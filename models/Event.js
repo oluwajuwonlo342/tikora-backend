@@ -43,20 +43,11 @@ const eventSchema = new mongoose.Schema(
       trim: true,
     },
 
-category: {
+
+  category: {
     type: String,
     required: true,
-    enum: [
-      'music & concerts',
-      'party & nightlife',
-      'business & tech',
-      'arts & culture',
-      'sports & fitness',
-      'education',
-      'festivals',
-      'comedy shows',
-      'other'
-    ],
+    enum: ['Party', 'Music', 'Business', 'Arts', 'Sports', 'Education', 'Festival', 'party', 'music', 'business', 'arts', 'sports', 'education', 'festival']
   },
     date: {
       type: Date,
