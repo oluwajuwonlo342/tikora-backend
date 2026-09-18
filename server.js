@@ -16,7 +16,7 @@ import payoutRoutes from "./routes/payoutRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 
 const app = express();
-
+app.set('trust proxy', 1);
 connectDB();
 
 // Find your cors setup and update the origin array:
