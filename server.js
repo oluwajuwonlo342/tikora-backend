@@ -19,12 +19,14 @@ const app = express();
 
 connectDB();
 
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL,
-    credentials: true,
-  })
-);
+// Find your cors setup and update the origin array:
+app.use(cors({
+  origin: [
+    'http://localhost:5174', 
+    'https://tikora.onrender.com' // <-- Add your live frontend URL here!
+  ],
+  credentials: true 
+}));
 
 app.use(helmet());
 app.use(morgan("dev"));
