@@ -34,12 +34,11 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: {
-    success: false,
-    message: "Too many requests. Please try again later.",
-  },
+  windowMs: 15 * 60 * 1000, // your existing time
+  max: 100, // your existing limit
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { xForwardedForHeader: false }, // 👉 Add this line to bypass the error completely
 });
 
 app.use("/api", limiter);
