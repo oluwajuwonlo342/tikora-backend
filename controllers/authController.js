@@ -26,6 +26,15 @@ export const register = async (req, res) => {
       });
     }
 
+    // Enforce Password Policy: Min 8 chars, 1 number, 1 special character
+    const passwordRegex = /^(?=.*[0-9])(?=.*[!@#$%^&*.,_+\-=\[\]{};':"\\|,.<>\/?]).{8,}$/;
+    if (!passwordRegex.test(password)) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 8 characters long, containing at least one number and one special character.",
+      });
+    }
+
     const existingUser = await User.findOne({
       email: email.toLowerCase(),
     });
