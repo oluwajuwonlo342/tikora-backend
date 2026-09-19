@@ -677,23 +677,18 @@ export const addAuthenticator = async (req, res) => {
     const { name, email } = req.body;
 
     const event = await Event.findById(eventId);
-    if (!event) {
-      return res.status(404).json({ message: "Event not found" });
-    }
+    if (!event) return res.status(404).json({ message: "Event not found" });
 
     // Make sure only the organizer can add staff
     if (event.organizer.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: "Only the organizer can add authenticators." });
     }
 
-    // ✅ FIX: Send the success response IMMEDIATELY so the frontend doesn't time out (30s limit)
-    res.status(200).json({ success: true, message: `Invitation is being sent to ${email}!` });
-
-    // ✅ FIX: Process the email in the background AFTER responding to the user
+    // ✅ FIX: Use port 587 (STARTTLS) to prevent hanging on cloud servers
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
+      port: 587, 
+      secure: false, // MUST be false when using port 587
       auth: {
         user: process.env.EMAIL_USER, 
         pass: process.env.EMAIL_PASS  
@@ -721,16 +716,13 @@ export const addAuthenticator = async (req, res) => {
       `
     };
 
-    // Use .then() instead of await so it runs invisibly in the background
-    transporter.sendMail(mailOptions)
-      .then(() => console.log(`Scanner invite successfully sent to ${email}`))
-      .catch((err) => console.error("Background scanner invite failed:", err.message));
+    // Send email first, then respond. Port 587 should process this in 1-2 seconds.
+    await transporter.sendMail(mailOptions);
+
+    res.status(200).json({ success: true, message: `Invitation sent to ${email} successfully!` });
 
   } catch (error) {
     console.error("Add authenticator error:", error);
-    // Only send a 500 error if we haven't already sent the 200 success response
-    if (!res.headersSent) {
-      res.status(500).json({ success: false, message: "Failed to send invitation." });
-    }
+    res.status(500).json({ success: false, message: "Failed to send invitation." });
   }
 };
