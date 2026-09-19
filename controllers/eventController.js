@@ -3,30 +3,52 @@ import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js"; 
 import Payout from "../models/Payout.js";
 import cloudinary from "../config/cloudinary.js";
-import nodemailer from 'nodemailer';
 
 // ==========================================
-// EMAIL HELPERS (Brevo SMTP)
+// EMAIL HELPERS (Brevo HTTP API - works on Render, no SMTP ports needed)
 // ==========================================
-let cachedTransporter = null;
-
-const getTransporter = () => {
-  if (!cachedTransporter) {
-    cachedTransporter = nodemailer.createTransport({
-      host: 'smtp-relay.brevo.com',
-      port: 587,
-      secure: false,
-      auth: {
-        user: process.env.EMAIL_USER, // Brevo SMTP login (see Brevo > SMTP & API)
-        pass: process.env.EMAIL_PASS  // Brevo SMTP key
-      },
-      // Fail fast instead of hanging forever if the SMTP port is blocked
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 15000,
-    });
+const sendBrevoEmail = async ({ to, toName, subject, html }) => {
+  if (!process.env.BREVO_API_KEY) {
+    throw new Error("BREVO_API_KEY is not set.");
   }
-  return cachedTransporter;
+
+  const senderEmail = process.env.EMAIL_FROM;
+  if (!senderEmail) {
+    throw new Error("EMAIL_FROM is not set.");
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "api-key": process.env.BREVO_API_KEY,
+      },
+      body: JSON.stringify({
+        sender: { name: "Tickora Scanner Auth", email: senderEmail },
+        to: [{ email: to, name: toName }],
+        subject,
+        htmlContent: html,
+      }),
+      signal: controller.signal,
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(
+        `Brevo API ${response.status}: ${data.message || JSON.stringify(data)}`
+      );
+    }
+
+    return data; // { messageId: "..." }
+  } finally {
+    clearTimeout(timeout);
+  }
 };
 
 const escapeHtml = (value = "") =>
@@ -748,15 +770,7 @@ export const addAuthenticator = async (req, res) => {
     const clientUrl = (process.env.CLIENT_URL || 'https://tikora-backend.onrender.com').replace(/\/$/, '');
     const scannerLink = `${clientUrl}/organizer/scanner`;
 
-    // The "from" address MUST be a sender you have verified in Brevo,
-    // otherwise Brevo drops the mail or it lands in spam.
-    const fromAddress = process.env.EMAIL_FROM || process.env.EMAIL_USER;
-
-    const mailOptions = {
-      from: `"Tickora Scanner Auth" <${fromAddress}>`,
-      to: cleanEmail,
-      subject: `You've been invited to scan tickets for: ${event.title}`,
-      html: `
+    const html = `
         <div style="font-family: sans-serif; padding: 20px; background: #f9f9f9; text-align: center;">
           <h2 style="color: #ff5a36;">Ticket Authenticator Invitation</h2>
           <p>Hello <strong>${escapeHtml(cleanName)}</strong>,</p>
@@ -768,25 +782,20 @@ export const addAuthenticator = async (req, res) => {
           </div>
           <p style="color: #777; font-size: 12px;">If you do not have an account, you will be prompted to create one first.</p>
         </div>
-      `
-    };
+      `;
 
-    // Send the email and WAIT for the result so we never report a false success
+    // Send via Brevo HTTP API and WAIT for the result so we never report a false success
     try {
-      const info = await getTransporter().sendMail(mailOptions);
+      const result = await sendBrevoEmail({
+        to: cleanEmail,
+        toName: cleanName,
+        subject: `You've been invited to scan tickets for: ${event.title}`,
+        html,
+      });
 
-      console.log(`✅ Scanner invite accepted by Brevo for ${cleanEmail}. Message ID: ${info.messageId}`);
-      console.log("SMTP response:", info.response);
-
-      if (info.rejected && info.rejected.length > 0) {
-        console.error("❌ Recipient rejected:", info.rejected);
-        return res.status(502).json({
-          success: false,
-          message: "The email address was rejected by the mail server.",
-        });
-      }
+      console.log(`✅ Scanner invite accepted by Brevo for ${cleanEmail}. Message ID: ${result.messageId}`);
     } catch (mailError) {
-      console.error("❌ Scanner invite failed to send:", mailError);
+      console.error("❌ Scanner invite failed to send:", mailError.message);
       return res.status(502).json({
         success: false,
         message: "Could not send the invitation email. Please try again later.",
