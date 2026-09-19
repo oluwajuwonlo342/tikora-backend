@@ -676,19 +676,31 @@ export const addAuthenticator = async (req, res) => {
     const { id: eventId } = req.params;
     const { name, email } = req.body;
 
+    // Log the incoming request so it shows up in your Render dashboard
+    console.log(`========== ADD AUTHENTICATOR ==========`);
+    console.log(`Event ID: ${eventId}, Invitee: ${email}`);
+
     const event = await Event.findById(eventId);
-    if (!event) return res.status(404).json({ message: "Event not found" });
+    if (!event) {
+      console.log("Error: Event not found");
+      return res.status(404).json({ message: "Event not found" });
+    }
 
     // Make sure only the organizer can add staff
     if (event.organizer.toString() !== req.user._id.toString()) {
+      console.log("Error: Unauthorized user tried to add authenticator");
       return res.status(403).json({ message: "Only the organizer can add authenticators." });
     }
 
-    // ✅ FIX: Use port 587 (STARTTLS) to prevent hanging on cloud servers
+    // 1. Send the success response IMMEDIATELY so the frontend stops hanging
+    res.status(200).json({ success: true, message: `Invitation sent to ${email} successfully!` });
+    console.log("Success response sent to frontend. Starting background email dispatch...");
+
+    // 2. Use the exact same proven configuration that worked in your ticketController
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
-      port: 587, 
-      secure: false, // MUST be false when using port 587
+      port: 465,
+      secure: true,
       auth: {
         user: process.env.EMAIL_USER, 
         pass: process.env.EMAIL_PASS  
@@ -716,13 +728,16 @@ export const addAuthenticator = async (req, res) => {
       `
     };
 
-    // Send email first, then respond. Port 587 should process this in 1-2 seconds.
-    await transporter.sendMail(mailOptions);
-
-    res.status(200).json({ success: true, message: `Invitation sent to ${email} successfully!` });
+    // 3. Send email invisibly in the background and log the exact result
+    transporter.sendMail(mailOptions)
+      .then((info) => console.log(`✅ Scanner invite successfully delivered to ${email}! Message ID: ${info.messageId}`))
+      .catch((err) => console.error("❌ Background scanner invite failed to send:", err));
 
   } catch (error) {
     console.error("Add authenticator error:", error);
-    res.status(500).json({ success: false, message: "Failed to send invitation." });
+    // Only send a 500 error if we haven't already sent the 200 success response
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: "Failed to process invitation." });
+    }
   }
 };
