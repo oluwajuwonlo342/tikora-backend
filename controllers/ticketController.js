@@ -1,10 +1,25 @@
 import Event from '../models/Event.js';
 import Ticket from '../models/Ticket.js';
-import User from '../models/User.js'; // ✅ ADDED: Required for guest checkout auto-creation
+import User from '../models/User.js';
 import axios from 'axios';
 import qrcode from 'qrcode';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
+
+// ==========================================
+// HELPER: CREATE TRANSPORTER
+// ==========================================
+const createTransporter = () => {
+  return nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
+    }
+  });
+};
 
 // ==========================================
 // HELPER: GENERATE TICKET CODE
@@ -47,7 +62,6 @@ export const initializePurchase = async (req, res) => {
     if (totalAmount === 0) {
       const freeReference = `FREE-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
       
-      // ✅ FIX: Update tier count AND total event stats for Admin Dashboard
       tier.sold += Number(quantity);
       event.eventTicketsSold = (event.eventTicketsSold || 0) + Number(quantity);
       await event.save();
@@ -62,7 +76,7 @@ export const initializePurchase = async (req, res) => {
 
         ticketsToCreate.push({
           event: eventId,
-          buyer: buyerId, // Let this be null for free guest tickets (or you can apply the same auto-create logic here if desired)
+          buyer: buyerId,
           organizer: event.organizer,
           ticketType,
           ticketCode: uniqueCode,
@@ -86,44 +100,42 @@ export const initializePurchase = async (req, res) => {
       const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
       await Ticket.insertMany(dbTickets);
 
-      setImmediate(async () => {
-        const transporter = nodemailer.createTransport({
-          service: 'gmail',
-          auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
-        });
+      // ✅ FIX: Send emails synchronously before returning response
+      try {
+        const transporter = createTransporter();
 
         for (let i = 0; i < ticketsToCreate.length; i++) {
           const ticket = ticketsToCreate[i];
           const safeEmail = ticket._recipientEmail ? String(ticket._recipientEmail).trim() : null;
           if (!safeEmail) continue;
 
-          try {
-            await transporter.sendMail({
-              from: '"Tickora Events" <no-reply@tickora.com>',
-              to: safeEmail,
-              subject: `Ticket Confirmed: ${event.title} (${ticket.ticketCode})`,
-              html: `
-                <div style="font-family: 'Space Grotesk', sans-serif; padding: 20px; text-align: center; background: #f9f9f9;">
-                  <h2 style="color: #ff5a36;">You're going to ${event.title}!</h2>
-                  <p>Hi <strong>${ticket.attendee.firstName}</strong>,</p>
-                  <p>Your free registration was successful. Please present the QR code below at the gate.</p>
-                  <div style="margin: 30px 0;">
-                    <img src="cid:ticket-qr-${i}" alt="Ticket QR Code" style="width: 200px; height: 200px; border-radius: 10px; border: 2px solid #ddd;" />
-                  </div>
-                  <div style="background: white; padding: 15px; border-radius: 10px; display: inline-block; text-align: left; border: 1px solid #eee;">
-                    <p style="margin: 5px 0;"><strong>Ticket Type:</strong> ${ticket.ticketType}</p>
-                    <p style="margin: 5px 0;"><strong>Ticket Code:</strong> ${ticket.ticketCode}</p>
-                  </div>
+          await transporter.sendMail({
+            from: '"Tickora Events" <no-reply@tickora.com>',
+            to: safeEmail,
+            subject: `Ticket Confirmed: ${event.title} (${ticket.ticketCode})`,
+            html: `
+              <div style="font-family: 'Space Grotesk', sans-serif; padding: 20px; text-align: center; background: #f9f9f9;">
+                <h2 style="color: #ff5a36;">You're going to ${event.title}!</h2>
+                <p>Hi <strong>${ticket.attendee.firstName}</strong>,</p>
+                <p>Your free registration was successful. Please present the QR code below at the gate.</p>
+                <div style="margin: 30px 0;">
+                  <img src="cid:ticket-qr-${i}" alt="Ticket QR Code" style="width: 200px; height: 200px; border-radius: 10px; border: 2px solid #ddd;" />
                 </div>
-              `,
-              attachments: [
-                { filename: `inline-qr-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', cid: `ticket-qr-${i}` },
-                { filename: `Download-Ticket-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', contentType: 'image/png', disposition: 'attachment' }
-              ]
-            });
-          } catch (err) { console.error('Free email error:', err.message); }
+                <div style="background: white; padding: 15px; border-radius: 10px; display: inline-block; text-align: left; border: 1px solid #eee;">
+                  <p style="margin: 5px 0;"><strong>Ticket Type:</strong> ${ticket.ticketType}</p>
+                  <p style="margin: 5px 0;"><strong>Ticket Code:</strong> ${ticket.ticketCode}</p>
+                </div>
+              </div>
+            `,
+            attachments: [
+              { filename: `inline-qr-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', cid: `ticket-qr-${i}` },
+              { filename: `Download-Ticket-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', contentType: 'image/png', disposition: 'attachment' }
+            ]
+          });
         }
-      });
+      } catch (err) { 
+        console.error('Free email error:', err.message); 
+      }
 
       return res.status(200).json({
         authorization_url: `/payment/verify?reference=${freeReference}`,
@@ -144,7 +156,7 @@ export const initializePurchase = async (req, res) => {
           eventId,
           ticketType,
           quantity,
-          buyerId, // ✅ This will be null for guests, which is fine for Paystack
+          buyerId,
           attendees 
         }
       },
@@ -185,7 +197,6 @@ export const verifyPurchase = async (req, res) => {
 
     const existingTickets = await Ticket.find({ paymentReference: new RegExp(`^${reference}`) });
     if (existingTickets.length > 0) {
-      console.log(`Duplicate verification attempt safely caught for reference: ${reference}`);
       return res.status(200).json({ success: true, message: "Already verified", tickets: existingTickets });
     }
 
@@ -205,7 +216,7 @@ export const verifyPurchase = async (req, res) => {
       return res.status(200).json({ success: true, message: "Already verified", tickets: reCheckedTickets });
     }
 
-    // ✅ FIX: GUEST CHECKOUT AUTO-ACCOUNT CREATION
+    // GUEST CHECKOUT AUTO-ACCOUNT CREATION
     let finalBuyerId = buyerId;
     if (!finalBuyerId) {
       let guestUser = await User.findOne({ email: buyerEmail });
@@ -224,7 +235,6 @@ export const verifyPurchase = async (req, res) => {
     const event = await Event.findById(eventId);
     const tier = event.tickets.find(t => t.name === ticketType);
     
-    // ✅ FIX: Update tier count AND Admin Dashboard stats
     tier.sold += Number(quantity);
     event.eventTicketsSold = (event.eventTicketsSold || 0) + Number(quantity);
     event.eventRevenue = (event.eventRevenue || 0) + (txData.amount / 100); 
@@ -246,7 +256,7 @@ export const verifyPurchase = async (req, res) => {
 
       ticketsToCreate.push({
         event: eventId,
-        buyer: finalBuyerId, // ✅ Use the verified or created user ID
+        buyer: finalBuyerId,
         organizer: event.organizer,
         ticketType,
         ticketCode: uniqueCode,
@@ -271,53 +281,44 @@ export const verifyPurchase = async (req, res) => {
     const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
     const savedTickets = await Ticket.insertMany(dbTickets);
 
-    res.status(200).json({ success: true, message: "Tickets generated successfully", tickets: savedTickets });
-
-    // 5. Send Emails in the Background
-    setImmediate(async () => {
-      const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASS
-        }
-      });
+    // ✅ FIX: Send Emails synchronously before sending success response
+    try {
+      const transporter = createTransporter();
 
       for (let i = 0; i < ticketsToCreate.length; i++) {
         const ticket = ticketsToCreate[i];
         const safeEmail = ticket._recipientEmail ? String(ticket._recipientEmail).trim() : null;
         if (!safeEmail) continue;
 
-        try {
-          await transporter.sendMail({
-            from: '"Tickora Events" <no-reply@tickora.com>',
-            to: safeEmail,
-            subject: `Ticket Confirmed: ${event.title} (${ticket.ticketCode})`,
-            html: `
-              <div style="font-family: 'Space Grotesk', sans-serif; padding: 20px; text-align: center; background: #f9f9f9;">
-                <h2 style="color: #ff5a36;">You're going to ${event.title}!</h2>
-                <p>Hi <strong>${ticket.attendee.firstName}</strong>,</p>
-                <p>Your payment was successful. Please present the QR code below at the gate for entry.</p>
-                <div style="margin: 30px 0;">
-                  <img src="cid:ticket-qr-${i}" alt="Ticket QR Code" style="width: 200px; height: 200px; border-radius: 10px; border: 2px solid #ddd;" />
-                </div>
-                <div style="background: white; padding: 15px; border-radius: 10px; display: inline-block; text-align: left; border: 1px solid #eee;">
-                  <p style="margin: 5px 0;"><strong>Ticket Type:</strong> ${ticket.ticketType}</p>
-                  <p style="margin: 5px 0;"><strong>Ticket Code:</strong> ${ticket.ticketCode}</p>
-                </div>
+        await transporter.sendMail({
+          from: '"Tickora Events" <no-reply@tickora.com>',
+          to: safeEmail,
+          subject: `Ticket Confirmed: ${event.title} (${ticket.ticketCode})`,
+          html: `
+            <div style="font-family: 'Space Grotesk', sans-serif; padding: 20px; text-align: center; background: #f9f9f9;">
+              <h2 style="color: #ff5a36;">You're going to ${event.title}!</h2>
+              <p>Hi <strong>${ticket.attendee.firstName}</strong>,</p>
+              <p>Your payment was successful. Please present the QR code below at the gate for entry.</p>
+              <div style="margin: 30px 0;">
+                <img src="cid:ticket-qr-${i}" alt="Ticket QR Code" style="width: 200px; height: 200px; border-radius: 10px; border: 2px solid #ddd;" />
               </div>
-            `,
-            attachments: [
-              { filename: `inline-qr-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', cid: `ticket-qr-${i}` },
-              { filename: `Download-Ticket-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', contentType: 'image/png', disposition: 'attachment' }
-            ]
-          });
-          console.log(`Background email sent to ${safeEmail}`);
-        } catch (err) {
-          console.error(`Background email failed for ${safeEmail}:`, err.message);
-        }
+              <div style="background: white; padding: 15px; border-radius: 10px; display: inline-block; text-align: left; border: 1px solid #eee;">
+                <p style="margin: 5px 0;"><strong>Ticket Type:</strong> ${ticket.ticketType}</p>
+                <p style="margin: 5px 0;"><strong>Ticket Code:</strong> ${ticket.ticketCode}</p>
+              </div>
+            </div>
+          `,
+          attachments: [
+            { filename: `inline-qr-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', cid: `ticket-qr-${i}` },
+            { filename: `Download-Ticket-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', contentType: 'image/png', disposition: 'attachment' }
+          ]
+        });
       }
-    });
+    } catch (err) {
+      console.error('Email dispatch error:', err.message);
+    }
+
+    return res.status(200).json({ success: true, message: "Tickets generated successfully", tickets: savedTickets });
 
   } catch (error) {
     console.error("Verification error:", error);
@@ -398,14 +399,22 @@ export const verifyAndCheckInTicket = async (req, res) => {
     }
 
     if (ticket.status === 'cancelled') {
-      return res.status(400).json({ success: false, statusType: "CANCELLED", message: "This ticket has been cancelled." });
+      return res.status(400).json({ success: false, statusType: "CANCELLED", message: `This ${ticket.ticketType} ticket has been cancelled.` });
     }
 
     if (ticket.status === 'used') {
+      // ✅ FIX: Force Nigerian Timezone for the "Already Used" message
+      const formattedCheckInTime = new Date(ticket.usedAt).toLocaleString('en-NG', {
+        timeZone: 'Africa/Lagos',
+        dateStyle: 'medium',
+        timeStyle: 'short'
+      });
+
       return res.status(400).json({ 
         success: false, 
         statusType: "ALREADY_USED", 
-        message: "ALREADY USED: This ticket was already checked in at " + new Date(ticket.usedAt).toLocaleString() 
+        // ✅ FIX: Include ticket tier in the Already Used message
+        message: `ALREADY USED: This ${ticket.ticketType} ticket was already checked in at ${formattedCheckInTime}` 
       });
     }
 
@@ -419,7 +428,8 @@ export const verifyAndCheckInTicket = async (req, res) => {
     return res.status(200).json({
       success: true,
       statusType: "VALID",
-      message: "VALID TICKET - Check-in successful!",
+      // ✅ FIX: Display the exact ticket tier on successful scan
+      message: `VALID TICKET - ${ticket.ticketType} Check-in successful!`,
       ticket: {
         ticketCode: ticket.ticketCode,
         ticketType: ticket.ticketType,
