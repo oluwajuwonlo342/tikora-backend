@@ -1,13 +1,13 @@
 import mongoose from "mongoose";
 import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js"; 
-import Payout from "../models/Payout.js"; // ✅ ADD THIS LINE
+import Payout from "../models/Payout.js";
 import cloudinary from "../config/cloudinary.js";
 import nodemailer from 'nodemailer';
+
 // ==========================================
 // CREATE EVENT
 // ==========================================
-
 export const createEvent = async (req, res) => {
   try {
     console.log("========== CREATE EVENT ==========");
@@ -192,7 +192,6 @@ export const createEvent = async (req, res) => {
 // ==========================================
 // GET ALL EVENTS
 // ==========================================
-
 export const getEvents = async (req, res) => {
   try {
     const { category, search } = req.query;
@@ -209,20 +208,17 @@ export const getEvents = async (req, res) => {
       filter.$or = [
         {
           title: {
-            $regex: search,
-            $options: "i",
+            $regex: search,$options: "i",
           },
         },
         {
           location: {
-            $regex: search,
-            $options: "i",
+            $regex: search,$options: "i",
           },
         },
         {
           venue: {
-            $regex: search,
-            $options: "i",
+            $regex: search,$options: "i",
           },
         },
       ];
@@ -247,6 +243,7 @@ export const getEvents = async (req, res) => {
     });
   }
 };
+
 // ==========================================
 // GET SINGLE EVENT
 // ==========================================
@@ -260,12 +257,10 @@ export const getEventById = async (req, res) => {
       });
     }
 
-    // ✅ FIX: Use findByIdAndUpdate with $inc to bypass full document validation
-    // This securely increments the view count directly in the database
     const event = await Event.findByIdAndUpdate(
       req.params.id,
       { $inc: { views: 1 } },
-      { new: true } // Returns the newly updated document
+      { new: true } 
     ).populate(
       "organizer",
       "name avatar email"
@@ -292,6 +287,7 @@ export const getEventById = async (req, res) => {
     });
   }
 };
+
 export const getMyEvents = async (req, res) => {
   try {
     console.log("========== GET MY EVENTS ==========");
@@ -331,7 +327,6 @@ export const getMyEvents = async (req, res) => {
 // ==========================================
 // UPDATE EVENT
 // ==========================================
-
 export const updateEvent = async (req, res) => {
   try {
     const { id } = req.params;
@@ -489,7 +484,6 @@ export const updateEvent = async (req, res) => {
 // ==========================================
 // DELETE EVENT
 // ==========================================
-
 export const deleteEvent = async (req, res) => {
   try {
     const { id } = req.params;
@@ -690,12 +684,14 @@ export const addAuthenticator = async (req, res) => {
       return res.status(403).json({ message: "Only the organizer can add authenticators." });
     }
 
-    // Configure your email transporter (Replace with your actual SMTP details or Gmail App Password)
+    // ✅ FIX: Configure your email transporter securely
     const transporter = nodemailer.createTransport({
-      service: 'gmail',
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
       auth: {
-        user: process.env.EMAIL_USER, // e.g., your platform's email
-        pass: process.env.EMAIL_PASS  // e.g., an App Password from Google
+        user: process.env.EMAIL_USER, 
+        pass: process.env.EMAIL_PASS  
       }
     });
 
@@ -721,6 +717,7 @@ export const addAuthenticator = async (req, res) => {
       `
     };
 
+    // ✅ FIX: Await the mail dispatch to prevent Render timeouts
     await transporter.sendMail(mailOptions);
 
     res.status(200).json({ success: true, message: `Invitation sent to ${email} successfully!` });
