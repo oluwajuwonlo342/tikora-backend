@@ -677,14 +677,19 @@ export const addAuthenticator = async (req, res) => {
     const { name, email } = req.body;
 
     const event = await Event.findById(eventId);
-    if (!event) return res.status(404).json({ message: "Event not found" });
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
 
     // Make sure only the organizer can add staff
     if (event.organizer.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: "Only the organizer can add authenticators." });
     }
 
-    // ✅ FIX: Configure your email transporter securely
+    // ✅ FIX: Send the success response IMMEDIATELY so the frontend doesn't time out (30s limit)
+    res.status(200).json({ success: true, message: `Invitation is being sent to ${email}!` });
+
+    // ✅ FIX: Process the email in the background AFTER responding to the user
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 465,
@@ -695,7 +700,6 @@ export const addAuthenticator = async (req, res) => {
       }
     });
 
-    // The direct link to your platform's scanner
     const scannerLink = `${process.env.CLIENT_URL || 'http://localhost:5174'}/organizer/scanner`;
 
     const mailOptions = {
@@ -717,13 +721,16 @@ export const addAuthenticator = async (req, res) => {
       `
     };
 
-    // ✅ FIX: Await the mail dispatch to prevent Render timeouts
-    await transporter.sendMail(mailOptions);
-
-    res.status(200).json({ success: true, message: `Invitation sent to ${email} successfully!` });
+    // Use .then() instead of await so it runs invisibly in the background
+    transporter.sendMail(mailOptions)
+      .then(() => console.log(`Scanner invite successfully sent to ${email}`))
+      .catch((err) => console.error("Background scanner invite failed:", err.message));
 
   } catch (error) {
     console.error("Add authenticator error:", error);
-    res.status(500).json({ success: false, message: "Failed to send invitation." });
+    // Only send a 500 error if we haven't already sent the 200 success response
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: "Failed to send invitation." });
+    }
   }
 };
