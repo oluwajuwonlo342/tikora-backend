@@ -697,17 +697,18 @@ export const addAuthenticator = async (req, res) => {
     console.log("Success response sent to frontend. Starting background email dispatch...");
 
     // 2. Use the exact same proven configuration that worked in your ticketController
-    const transporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      auth: {
-        user: process.env.EMAIL_USER, 
-        pass: process.env.EMAIL_PASS  
-      }
-    });
-
-    const scannerLink = `${process.env.CLIENT_URL || 'http://localhost:5174'}/organizer/scanner`;
+const createTransporter = () => {
+  return nodemailer.createTransport({
+    host: 'smtp-relay.brevo.com',
+    port: 587,
+    secure: false,
+    auth: {
+      user: process.env.EMAIL_USER, // Your Brevo account email
+      pass: process.env.EMAIL_PASS  // Your Brevo SMTP key
+    }
+  });
+};
+    const scannerLink = `${process.env.CLIENT_URL || 'https://tikora-backend.onrender.com'}/organizer/scanner`;
 
     const mailOptions = {
       from: '"Tickora Scanner Auth" <no-reply@tickora.com>',
