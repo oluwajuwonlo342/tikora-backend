@@ -6,6 +6,41 @@ import cloudinary from "../config/cloudinary.js";
 import nodemailer from 'nodemailer';
 
 // ==========================================
+// EMAIL HELPERS (Brevo SMTP)
+// ==========================================
+let cachedTransporter = null;
+
+const getTransporter = () => {
+  if (!cachedTransporter) {
+    cachedTransporter = nodemailer.createTransport({
+      host: 'smtp-relay.brevo.com',
+      port: 587,
+      secure: false,
+      auth: {
+        user: process.env.EMAIL_USER, // Brevo SMTP login (see Brevo > SMTP & API)
+        pass: process.env.EMAIL_PASS  // Brevo SMTP key
+      },
+      // Fail fast instead of hanging forever if the SMTP port is blocked
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
+    });
+  }
+  return cachedTransporter;
+};
+
+const escapeHtml = (value = "") =>
+  String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const isValidEmail = (email) =>
+  typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+
+// ==========================================
 // CREATE EVENT
 // ==========================================
 export const createEvent = async (req, res) => {
@@ -635,7 +670,7 @@ export const getOrganizerStats = async (req, res) => {
       });
 
       const eventWithdrawn = activePayouts
-        .filter(p => p.event._id.toString() === event._id.toString())
+        .filter(p => p.event?._id?.toString() === event._id.toString())
         .reduce((sum, p) => sum + p.amount, 0);
 
       return {
@@ -671,54 +706,61 @@ export const getOrganizerStats = async (req, res) => {
   }
 };
 
+// ==========================================
+// ADD TICKET AUTHENTICATOR (SCANNER INVITE)
+// ==========================================
 export const addAuthenticator = async (req, res) => {
   try {
     const { id: eventId } = req.params;
     const { name, email } = req.body;
 
-    // Log the incoming request so it shows up in your Render dashboard
     console.log(`========== ADD AUTHENTICATOR ==========`);
     console.log(`Event ID: ${eventId}, Invitee: ${email}`);
+
+    // Validate input
+    if (!mongoose.Types.ObjectId.isValid(eventId)) {
+      return res.status(400).json({ success: false, message: "Invalid event ID." });
+    }
+
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ success: false, message: "Authenticator name is required." });
+    }
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ success: false, message: "A valid email address is required." });
+    }
+
+    const cleanName = String(name).trim();
+    const cleanEmail = email.trim().toLowerCase();
 
     const event = await Event.findById(eventId);
     if (!event) {
       console.log("Error: Event not found");
-      return res.status(404).json({ message: "Event not found" });
+      return res.status(404).json({ success: false, message: "Event not found" });
     }
 
     // Make sure only the organizer can add staff
     if (event.organizer.toString() !== req.user._id.toString()) {
       console.log("Error: Unauthorized user tried to add authenticator");
-      return res.status(403).json({ message: "Only the organizer can add authenticators." });
+      return res.status(403).json({ success: false, message: "Only the organizer can add authenticators." });
     }
 
-    // 1. Send the success response IMMEDIATELY so the frontend stops hanging
-    res.status(200).json({ success: true, message: `Invitation sent to ${email} successfully!` });
-    console.log("Success response sent to frontend. Starting background email dispatch...");
+    const clientUrl = (process.env.CLIENT_URL || 'https://tikora-backend.onrender.com').replace(/\/$/, '');
+    const scannerLink = `${clientUrl}/organizer/scanner`;
 
-    // 2. Use the exact same proven configuration that worked in your ticketController
-const createTransporter = () => {
-  return nodemailer.createTransport({
-    host: 'smtp-relay.brevo.com',
-    port: 587,
-    secure: false,
-    auth: {
-      user: process.env.EMAIL_USER, // Your Brevo account email
-      pass: process.env.EMAIL_PASS  // Your Brevo SMTP key
-    }
-  });
-};
-    const scannerLink = `${process.env.CLIENT_URL || 'https://tikora-backend.onrender.com'}/organizer/scanner`;
+    // The "from" address MUST be a sender you have verified in Brevo,
+    // otherwise Brevo drops the mail or it lands in spam.
+    const fromAddress = process.env.EMAIL_FROM || process.env.EMAIL_USER;
 
     const mailOptions = {
-      from: '"Tickora Scanner Auth" <no-reply@tickora.com>',
-      to: email,
+      from: `"Tickora Scanner Auth" <${fromAddress}>`,
+      to: cleanEmail,
       subject: `You've been invited to scan tickets for: ${event.title}`,
       html: `
         <div style="font-family: sans-serif; padding: 20px; background: #f9f9f9; text-align: center;">
           <h2 style="color: #ff5a36;">Ticket Authenticator Invitation</h2>
-          <p>Hello <strong>${name}</strong>,</p>
-          <p>You have been invited to act as a ticket authenticator at the gate for <strong>${event.title}</strong>.</p>
+          <p>Hello <strong>${escapeHtml(cleanName)}</strong>,</p>
+          <p>You have been invited to act as a ticket authenticator at the gate for <strong>${escapeHtml(event.title)}</strong>.</p>
           <div style="margin: 30px 0;">
             <a href="${scannerLink}" style="background: #ff5a36; color: white; padding: 12px 25px; text-decoration: none; border-radius: 8px; font-weight: bold;">
               Open Ticket Scanner
@@ -729,16 +771,36 @@ const createTransporter = () => {
       `
     };
 
-    // 3. Send email invisibly in the background and log the exact result
-    transporter.sendMail(mailOptions)
-      .then((info) => console.log(`✅ Scanner invite successfully delivered to ${email}! Message ID: ${info.messageId}`))
-      .catch((err) => console.error("❌ Background scanner invite failed to send:", err));
+    // Send the email and WAIT for the result so we never report a false success
+    try {
+      const info = await getTransporter().sendMail(mailOptions);
 
+      console.log(`✅ Scanner invite accepted by Brevo for ${cleanEmail}. Message ID: ${info.messageId}`);
+      console.log("SMTP response:", info.response);
+
+      if (info.rejected && info.rejected.length > 0) {
+        console.error("❌ Recipient rejected:", info.rejected);
+        return res.status(502).json({
+          success: false,
+          message: "The email address was rejected by the mail server.",
+        });
+      }
+    } catch (mailError) {
+      console.error("❌ Scanner invite failed to send:", mailError);
+      return res.status(502).json({
+        success: false,
+        message: "Could not send the invitation email. Please try again later.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Invitation sent to ${cleanEmail} successfully!`,
+    });
   } catch (error) {
     console.error("Add authenticator error:", error);
-    // Only send a 500 error if we haven't already sent the 200 success response
     if (!res.headersSent) {
-      res.status(500).json({ success: false, message: "Failed to process invitation." });
+      return res.status(500).json({ success: false, message: "Failed to process invitation." });
     }
   }
 };
