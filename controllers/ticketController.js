@@ -12,8 +12,8 @@ import nodemailer from 'nodemailer';
 const createTransporter = () => {
   return nodemailer.createTransport({
     host: 'smtp.gmail.com',
-    port: 587, // ✅ FIX: Use 587 to prevent Render timeouts
-    secure: false, // ✅ FIX: MUST be false for 587
+    port: 587,
+    secure: false, // MUST be false for 587
     auth: {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASS
@@ -21,9 +21,6 @@ const createTransporter = () => {
   });
 };
 
-// ==========================================
-// HELPER: GENERATE TICKET CODE
-// ==========================================
 const generateTicketCode = () => {
   return 'EVT-' + crypto.randomBytes(4).toString('hex').toUpperCase();
 };
@@ -100,45 +97,48 @@ export const initializePurchase = async (req, res) => {
       const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
       await Ticket.insertMany(dbTickets);
 
-      // ✅ FIX: Send Success Response FIRST so frontend doesn't hang
-      res.status(200).json({
+      // ✅ FIX: Await email sending BEFORE sending response so Render doesn't kill it
+      try {
+        const transporter = createTransporter();
+        for (let i = 0; i < ticketsToCreate.length; i++) {
+          const ticket = ticketsToCreate[i];
+          const safeEmail = ticket._recipientEmail ? String(ticket._recipientEmail).trim() : null;
+          if (!safeEmail) continue;
+
+          await transporter.sendMail({
+            from: '"Tickora Events" <no-reply@tickora.com>',
+            to: safeEmail,
+            subject: `Ticket Confirmed: ${event.title} (${ticket.ticketCode})`,
+            html: `
+              <div style="font-family: 'Space Grotesk', sans-serif; padding: 20px; text-align: center; background: #f9f9f9;">
+                <h2 style="color: #ff5a36;">You're going to ${event.title}!</h2>
+                <p>Hi <strong>${ticket.attendee.firstName}</strong>,</p>
+                <p>Your free registration was successful. Please present the QR code below at the gate.</p>
+                <div style="margin: 30px 0;">
+                  <img src="cid:ticket-qr-${i}" alt="Ticket QR Code" style="width: 200px; height: 200px; border-radius: 10px; border: 2px solid #ddd;" />
+                </div>
+                <div style="background: white; padding: 15px; border-radius: 10px; display: inline-block; text-align: left; border: 1px solid #eee;">
+                  <p style="margin: 5px 0;"><strong>Ticket Type:</strong> ${ticket.ticketType}</p>
+                  <p style="margin: 5px 0;"><strong>Ticket Code:</strong> ${ticket.ticketCode}</p>
+                </div>
+              </div>
+            `,
+            attachments: [
+              { filename: `inline-qr-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', cid: `ticket-qr-${i}` },
+              { filename: `Download-Ticket-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', contentType: 'image/png', disposition: 'attachment' }
+            ]
+          });
+          console.log(`Free ticket successfully sent to ${safeEmail}`);
+        }
+      } catch (err) {
+        console.error(`Free email error: ${err.message}`);
+      }
+
+      // ✅ FIX: Send response AFTER emails are safely sent
+      return res.status(200).json({
         authorization_url: `/payment/verify?reference=${freeReference}`,
         reference: freeReference
       });
-
-      // ✅ FIX: Send emails in background
-      const transporter = createTransporter();
-      for (let i = 0; i < ticketsToCreate.length; i++) {
-        const ticket = ticketsToCreate[i];
-        const safeEmail = ticket._recipientEmail ? String(ticket._recipientEmail).trim() : null;
-        if (!safeEmail) continue;
-
-        transporter.sendMail({
-          from: '"Tickora Events" <no-reply@tickora.com>',
-          to: safeEmail,
-          subject: `Ticket Confirmed: ${event.title} (${ticket.ticketCode})`,
-          html: `
-            <div style="font-family: 'Space Grotesk', sans-serif; padding: 20px; text-align: center; background: #f9f9f9;">
-              <h2 style="color: #ff5a36;">You're going to ${event.title}!</h2>
-              <p>Hi <strong>${ticket.attendee.firstName}</strong>,</p>
-              <p>Your free registration was successful. Please present the QR code below at the gate.</p>
-              <div style="margin: 30px 0;">
-                <img src="cid:ticket-qr-${i}" alt="Ticket QR Code" style="width: 200px; height: 200px; border-radius: 10px; border: 2px solid #ddd;" />
-              </div>
-              <div style="background: white; padding: 15px; border-radius: 10px; display: inline-block; text-align: left; border: 1px solid #eee;">
-                <p style="margin: 5px 0;"><strong>Ticket Type:</strong> ${ticket.ticketType}</p>
-                <p style="margin: 5px 0;"><strong>Ticket Code:</strong> ${ticket.ticketCode}</p>
-              </div>
-            </div>
-          `,
-          attachments: [
-            { filename: `inline-qr-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', cid: `ticket-qr-${i}` },
-            { filename: `Download-Ticket-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', contentType: 'image/png', disposition: 'attachment' }
-          ]
-        }).then(() => console.log(`Free ticket sent to ${safeEmail}`))
-          .catch(err => console.error(`Free email error: ${err.message}`));
-      }
-      return; // Exit function since response is already sent
     }
 
     // ===============================================
@@ -166,14 +166,14 @@ export const initializePurchase = async (req, res) => {
       }
     );
 
-    res.status(200).json({
+    return res.status(200).json({
       authorization_url: response.data.data.authorization_url,
       reference: response.data.data.reference
     });
 
   } catch (error) {
     console.error('Paystack Init Error:', error.response?.data || error.message);
-    res.status(500).json({ message: 'Failed to initialize payment' });
+    return res.status(500).json({ message: 'Failed to initialize payment' });
   }
 };
 
@@ -198,7 +198,6 @@ export const verifyPurchase = async (req, res) => {
       return res.status(200).json({ success: true, message: "Already verified", tickets: existingTickets });
     }
 
-    // 1. Verify with Paystack API
     const paystackVerify = await axios.get(`https://api.paystack.co/transaction/verify/${reference}`, {
       headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` }
     });
@@ -214,7 +213,6 @@ export const verifyPurchase = async (req, res) => {
       return res.status(200).json({ success: true, message: "Already verified", tickets: reCheckedTickets });
     }
 
-    // GUEST CHECKOUT AUTO-ACCOUNT CREATION
     let finalBuyerId = buyerId;
     if (!finalBuyerId) {
       let guestUser = await User.findOne({ email: buyerEmail });
@@ -238,7 +236,6 @@ export const verifyPurchase = async (req, res) => {
     event.eventRevenue = (event.eventRevenue || 0) + (txData.amount / 100); 
     await event.save();
 
-    // 3. Prepare all tickets in memory
     const ticketsToCreate = [];
     const ticketPrice = tier.price;
     const platformFee = ticketPrice * 0.07;
@@ -275,45 +272,48 @@ export const verifyPurchase = async (req, res) => {
       });
     }
 
-    // 4. Atomic Database Save
     const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
     const savedTickets = await Ticket.insertMany(dbTickets);
 
-    // ✅ FIX: Send Success Response FIRST to prevent Render from timing out the checkout screen
-    res.status(200).json({ success: true, message: "Tickets generated successfully", tickets: savedTickets });
+    // ✅ FIX: Await email sending BEFORE sending response so Render doesn't kill it
+    try {
+      const transporter = createTransporter();
+      for (let i = 0; i < ticketsToCreate.length; i++) {
+        const ticket = ticketsToCreate[i];
+        const safeEmail = ticket._recipientEmail ? String(ticket._recipientEmail).trim() : null;
+        if (!safeEmail) continue;
 
-    // ✅ FIX: Process emails invisibly in the background
-    const transporter = createTransporter();
-    for (let i = 0; i < ticketsToCreate.length; i++) {
-      const ticket = ticketsToCreate[i];
-      const safeEmail = ticket._recipientEmail ? String(ticket._recipientEmail).trim() : null;
-      if (!safeEmail) continue;
-
-      transporter.sendMail({
-        from: '"Tickora Events" <no-reply@tickora.com>',
-        to: safeEmail,
-        subject: `Ticket Confirmed: ${event.title} (${ticket.ticketCode})`,
-        html: `
-          <div style="font-family: 'Space Grotesk', sans-serif; padding: 20px; text-align: center; background: #f9f9f9;">
-            <h2 style="color: #ff5a36;">You're going to ${event.title}!</h2>
-            <p>Hi <strong>${ticket.attendee.firstName}</strong>,</p>
-            <p>Your payment was successful. Please present the QR code below at the gate for entry.</p>
-            <div style="margin: 30px 0;">
-              <img src="cid:ticket-qr-${i}" alt="Ticket QR Code" style="width: 200px; height: 200px; border-radius: 10px; border: 2px solid #ddd;" />
+        await transporter.sendMail({
+          from: '"Tickora Events" <no-reply@tickora.com>',
+          to: safeEmail,
+          subject: `Ticket Confirmed: ${event.title} (${ticket.ticketCode})`,
+          html: `
+            <div style="font-family: 'Space Grotesk', sans-serif; padding: 20px; text-align: center; background: #f9f9f9;">
+              <h2 style="color: #ff5a36;">You're going to ${event.title}!</h2>
+              <p>Hi <strong>${ticket.attendee.firstName}</strong>,</p>
+              <p>Your payment was successful. Please present the QR code below at the gate for entry.</p>
+              <div style="margin: 30px 0;">
+                <img src="cid:ticket-qr-${i}" alt="Ticket QR Code" style="width: 200px; height: 200px; border-radius: 10px; border: 2px solid #ddd;" />
+              </div>
+              <div style="background: white; padding: 15px; border-radius: 10px; display: inline-block; text-align: left; border: 1px solid #eee;">
+                <p style="margin: 5px 0;"><strong>Ticket Type:</strong> ${ticket.ticketType}</p>
+                <p style="margin: 5px 0;"><strong>Ticket Code:</strong> ${ticket.ticketCode}</p>
+              </div>
             </div>
-            <div style="background: white; padding: 15px; border-radius: 10px; display: inline-block; text-align: left; border: 1px solid #eee;">
-              <p style="margin: 5px 0;"><strong>Ticket Type:</strong> ${ticket.ticketType}</p>
-              <p style="margin: 5px 0;"><strong>Ticket Code:</strong> ${ticket.ticketCode}</p>
-            </div>
-          </div>
-        `,
-        attachments: [
-          { filename: `inline-qr-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', cid: `ticket-qr-${i}` },
-          { filename: `Download-Ticket-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', contentType: 'image/png', disposition: 'attachment' }
-        ]
-      }).then(() => console.log(`Paid ticket successfully sent to ${safeEmail}`))
-        .catch(err => console.error(`Paid ticket email error for ${safeEmail}: ${err.message}`));
+          `,
+          attachments: [
+            { filename: `inline-qr-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', cid: `ticket-qr-${i}` },
+            { filename: `Download-Ticket-${ticket.ticketCode}.png`, content: ticket._base64, encoding: 'base64', contentType: 'image/png', disposition: 'attachment' }
+          ]
+        });
+        console.log(`Paid ticket successfully sent to ${safeEmail}`);
+      }
+    } catch (err) {
+      console.error(`Paid ticket email error for ${safeEmail}: ${err.message}`);
     }
+
+    // ✅ FIX: Send response AFTER emails are safely sent
+    return res.status(200).json({ success: true, message: "Tickets generated successfully", tickets: savedTickets });
 
   } catch (error) {
     console.error("Verification error:", error);
