@@ -718,8 +718,8 @@ export const getOrganizerStats = async (req, res) => {
         totalWithdrawn
       },
       events: eventAnalytics,
-      // Send the top 50 most recent transactions to keep the payload fast
-      transactions: transactions.slice(0, 50) 
+      // Increased payload slice from 50 to 200 to accommodate multi-page transaction history
+      transactions: transactions.slice(0, 200) 
     });
 
   } catch (error) {
