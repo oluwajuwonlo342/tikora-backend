@@ -6,7 +6,7 @@ export const getDashboardStats = async (req, res) => {
     const totalUsers = await User.countDocuments();
     const activeEvents = await Event.countDocuments();
     
-    // ✅ FIX: Dynamically calculate platform revenue (7% fee) from all ticket sales
+    // Dynamically calculate platform revenue (7% fee) from all ticket sales
     const events = await Event.find();
     let platformRevenue = 0;
 
@@ -52,9 +52,37 @@ export const getAllUsers = async (req, res) => {
 
 export const getAllEvents = async (req, res) => {
   try {
-    const events = await Event.find().populate('organizer', 'name email').sort({ createdAt: -1 });
-    res.status(200).json({ success: true, events });
+    const events = await Event.find()
+      .populate('organizer', 'name email')
+      .sort({ createdAt: -1 });
+
+    // ✅ Attach calculated financial metrics and total tickets sold to each event for the admin view
+    const eventsWithFinancials = events.map(event => {
+      let grossEarned = 0;
+      let ticketsSoldCount = 0;
+
+      if (event.tickets && event.tickets.length > 0) {
+        event.tickets.forEach(tier => {
+          const sold = tier.sold || 0;
+          const price = tier.price || 0;
+          grossEarned += sold * price;
+          ticketsSoldCount += sold;
+        });
+      }
+
+      const platformFee = grossEarned * 0.07; // 7% platform fee
+
+      return {
+        ...event.toObject(),
+        grossEarned,
+        platformFee,
+        ticketsSoldCount
+      };
+    });
+
+    res.status(200).json({ success: true, events: eventsWithFinancials });
   } catch (error) {
+    console.error("Get all events error:", error);
     res.status(500).json({ success: false, message: 'Failed to fetch events' });
   }
 };
