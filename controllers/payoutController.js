@@ -10,6 +10,62 @@ const paystackHeaders = {
 };
 
 // ==========================================
+// GET BANK LIST (Via Paystack)
+//
+// Replaces a hardcoded bank list on the frontend. Paystack's /bank
+// endpoint returns every bank it supports, with the exact bank_code
+// each one needs for /bank/resolve and transfers. A hand-typed list
+// goes stale and can have wrong codes, which is why some banks never
+// resolved an account name — the code sent didn't match what Paystack
+// expects.
+//
+// Cached in memory for 24h since the bank list rarely changes and
+// this avoids hitting Paystack on every payout form load.
+// ==========================================
+let bankListCache = { data: null, fetchedAt: 0 };
+const BANK_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+export const getBanks = async (req, res) => {
+  try {
+    const isFresh = bankListCache.data && (Date.now() - bankListCache.fetchedAt < BANK_CACHE_TTL_MS);
+
+    if (isFresh) {
+      return res.status(200).json({ success: true, banks: bankListCache.data, cached: true });
+    }
+
+    const response = await axios.get(`${PAYSTACK_BASE}/bank`, {
+      headers: paystackHeaders,
+      params: {
+        country: 'nigeria',
+        currency: 'NGN',
+        perPage: 200
+      }
+    });
+
+    // Only keep NUBAN-type banks — these are the ones /bank/resolve and
+    // transfers actually work with. Non-NUBAN entries would otherwise
+    // show up as selectable but fail verification every time.
+    const banks = (response.data.data || [])
+      .filter((b) => b.type === 'nuban' && b.active !== false)
+      .map((b) => ({ code: b.code, name: b.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    bankListCache = { data: banks, fetchedAt: Date.now() };
+
+    return res.status(200).json({ success: true, banks, cached: false });
+  } catch (error) {
+    console.error('Get banks error:', error.response?.data || error.message);
+
+    // Serve stale cache rather than failing outright, if we have one
+    if (bankListCache.data) {
+      return res.status(200).json({ success: true, banks: bankListCache.data, cached: true, stale: true });
+    }
+
+    return res.status(502).json({ success: false, message: 'Could not load bank list from Paystack.' });
+  }
+};
+
+// ==========================================
 // VERIFY BANK ACCOUNT (Via Paystack)
 // Still works on a Starter Business — resolving account names is allowed
 // even though transferring money to them is not.
@@ -34,7 +90,12 @@ export const verifyBankAccount = async (req, res) => {
 
   } catch (error) {
     console.error('Bank verification error:', error.response?.data || error.message);
-    return res.status(400).json({ success: false, message: 'Could not verify bank account. Please check the details.' });
+
+    const paystackMessage = error.response?.data?.message;
+    return res.status(400).json({
+      success: false,
+      message: paystackMessage || 'Could not verify account details. Please check the account number and bank.'
+    });
   }
 };
 
@@ -152,18 +213,12 @@ export const getAllPayouts = async (req, res) => {
 // APPROVE PAYOUT — MANUAL TRANSFER (Admin Only)
 //
 // Your Paystack account is a Starter Business, which cannot initiate
-// transfers to third-party bank accounts (Paystack blocks this outright
-// with "You cannot initiate third party payouts as a starter business").
-// So this does NOT call Paystack's Transfer API. Instead:
+// transfers to third-party bank accounts. So this does NOT call
+// Paystack's Transfer API. Instead:
 //   1. The admin sends the money to the organizer themselves, via their
 //      own bank app/USSD, using payout.bankDetails shown in the admin UI.
 //   2. The admin then calls this endpoint with the bank's transaction
 //      reference as proof, and the payout is marked approved.
-//
-// If you later upgrade to a Registered Business on Paystack, this is
-// where you'd swap back in the Transfer Recipient + Transfer API calls.
-// The Payout model still has recipientCode/transferCode/
-// paystackTransferId fields reserved for that.
 // ==========================================
 export const approvePayout = async (req, res) => {
   try {
