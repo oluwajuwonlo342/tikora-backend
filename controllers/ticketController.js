@@ -8,59 +8,78 @@ import { sendBrevoEmail, escapeHtml } from '../utils/brevoMail.js';
 
 // ==========================================
 // HELPER: SEND TICKET EMAILS (Brevo HTTP API)
-// Emails are sent in parallel. A failed email is logged but
-// NEVER breaks the purchase, since the tickets are already saved.
+// Groups multiple tickets going to the same email into a single message
 // ==========================================
 const sendTicketEmails = async (ticketsData, event, isFree) => {
   const intro = isFree
     ? 'Your free registration was successful.'
     : 'Your payment was successful.';
 
-  const results = await Promise.allSettled(
-    ticketsData.map(async (ticket) => {
-      const safeEmail = ticket._recipientEmail
-        ? String(ticket._recipientEmail).trim()
-        : null;
+  // 1. Group tickets by their destination email
+  const groupedTickets = ticketsData.reduce((acc, ticket) => {
+    const email = ticket._recipientEmail ? String(ticket._recipientEmail).trim() : null;
+    if (email) {
+      if (!acc[email]) acc[email] = [];
+      acc[email].push(ticket);
+    }
+    return acc;
+  }, {});
 
-      if (!safeEmail) return { email: null, skipped: true };
+  // 2. Send one email per unique address
+  const results = await Promise.allSettled(
+    Object.entries(groupedTickets).map(async ([email, tickets]) => {
+      
+      const primaryAttendee = tickets[0].attendee;
+      const primaryName = `${primaryAttendee.firstName || ''} ${primaryAttendee.lastName || ''}`.trim() || undefined;
+      const ticketCountText = tickets.length > 1 ? `Here are your ${tickets.length} tickets:` : `Here is your ticket:`;
+
+      // Build all attachments for this specific email
+      const attachments = tickets.map(ticket => ({
+        name: `Ticket-${ticket.ticketCode}.png`,
+        content: ticket._base64,
+      }));
+
+      // Build the HTML breakdown for all tickets in this email
+      const ticketDetailsHtml = tickets.map(ticket => `
+        <div style="background: white; padding: 15px; border-radius: 10px; border: 1px solid #eee; margin-top: 10px;">
+          <p style="margin: 5px 0;"><strong>Attendee:</strong> ${escapeHtml(ticket.attendee.firstName)} ${escapeHtml(ticket.attendee.lastName)}</p>
+          <p style="margin: 5px 0;"><strong>Ticket Type:</strong> ${escapeHtml(ticket.ticketType)}</p>
+          <p style="margin: 5px 0;"><strong>Ticket Code:</strong> ${escapeHtml(ticket.ticketCode)}</p>
+        </div>
+      `).join('');
 
       await sendBrevoEmail({
-        to: safeEmail,
-        toName: `${ticket.attendee.firstName || ''} ${ticket.attendee.lastName || ''}`.trim() || undefined,
+        to: email,
+        toName: primaryName,
         senderName: 'Tickora Events',
-        subject: `Ticket Confirmed: ${event.title} (${ticket.ticketCode})`,
+        subject: `Tickets Confirmed: ${event.title} (${tickets.length} Ticket${tickets.length > 1 ? 's' : ''})`,
         html: `
           <div style="font-family: sans-serif; padding: 20px; text-align: center; background: #f9f9f9;">
             <h2 style="color: #ff5a36;">You're going to ${escapeHtml(event.title)}!</h2>
-            <p>Hi <strong>${escapeHtml(ticket.attendee.firstName)}</strong>,</p>
-            <p>${intro} Your QR code ticket is attached to this email as an image. Please present it at the gate for entry.</p>
-            <div style="background: white; padding: 15px; border-radius: 10px; display: inline-block; text-align: left; border: 1px solid #eee; margin-top: 20px;">
-              <p style="margin: 5px 0;"><strong>Ticket Type:</strong> ${escapeHtml(ticket.ticketType)}</p>
-              <p style="margin: 5px 0;"><strong>Ticket Code:</strong> ${escapeHtml(ticket.ticketCode)}</p>
+            <p>Hi <strong>${escapeHtml(primaryAttendee.firstName)}</strong>,</p>
+            <p>${intro} ${ticketCountText} The QR codes are attached to this email as images. Please present them at the gate for entry.</p>
+            
+            <div style="text-align: left; display: inline-block; width: 100%; max-width: 500px; margin-top: 10px;">
+              ${ticketDetailsHtml}
             </div>
           </div>
         `,
-        attachments: [
-          {
-            name: `Ticket-${ticket.ticketCode}.png`,
-            content: ticket._base64,
-          },
-        ],
+        attachments: attachments,
       });
 
-      return { email: safeEmail, skipped: false };
+      return { email, count: tickets.length, skipped: false };
     })
   );
 
-  results.forEach((result, i) => {
+  // 3. Log results
+  results.forEach((result) => {
     const label = isFree ? 'Free' : 'Paid';
     if (result.status === 'fulfilled') {
       if (!result.value.skipped) {
-        console.log(`✅ ${label} ticket emailed to ${result.value.email}`);
+        console.log(`✅ ${label} email sent to ${result.value.email} with ${result.value.count} ticket(s).`);
       }
     } else {
-      const target = ticketsData[i]._recipientEmail || 'unknown email';
-      console.error(`❌ ${label} ticket email failed for ${target}: ${result.reason?.message}`);
+      console.error(`❌ ${label} ticket email failed: ${result.reason?.message}`);
     }
   });
 };
