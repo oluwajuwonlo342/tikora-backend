@@ -23,31 +23,48 @@ const payoutSchema = new mongoose.Schema(
       bankName: { type: String },
     },
     status: {
-      // 'otp_required': Paystack created the transfer but it needs OTP
-      // confirmation (either in the Paystack dashboard, or via a finalize
-      // step) before money actually moves.
+      // 'otp_required' is kept for compatibility in case you upgrade to a
+      // Registered Business later and switch back to real Paystack
+      // Transfers. The current manual-approval flow only ever uses
+      // 'pending', 'approved' and 'rejected'.
       type: String,
       enum: ['pending', 'otp_required', 'approved', 'rejected'],
       default: 'pending',
     },
-    // Paystack transfer recipient code (e.g. "RCP_xxx"), created once per
-    // payout and reused if the first transfer attempt has to be retried.
+
+    // ==========================================
+    // MANUAL PAYOUT FIELDS (used now, on Starter Business)
+    // ==========================================
+    // Set true once the admin has sent the money themselves via their own
+    // bank app/USSD, outside Paystack — because a Starter Business cannot
+    // initiate transfers to third-party bank accounts.
+    paidManually: {
+      type: Boolean,
+      default: false,
+    },
+    // The bank's transaction reference/receipt ID, entered by the admin
+    // as proof when they confirm a manual payout.
+    paymentReference: {
+      type: String,
+      default: '',
+    },
+
+    // ==========================================
+    // PAYSTACK TRANSFER FIELDS (unused while on Starter Business —
+    // kept so you can switch back to automatic transfers without another
+    // schema migration once you upgrade to a Registered Business)
+    // ==========================================
     recipientCode: {
       type: String,
       default: '',
     },
-    // Paystack transfer code (e.g. "TRF_xxx"), returned when the transfer
-    // is initiated. Needed to finalize an OTP-pending transfer later.
     transferCode: {
       type: String,
       default: '',
     },
-    // Paystack's internal numeric transfer id, also returned on initiate.
     paystackTransferId: {
       type: Number,
     },
-    // Kept for compatibility with any existing code/UI that reads this
-    // field; mirrors transferCode once a transfer has been initiated.
     paystackTransferReference: {
       type: String,
       default: '',
