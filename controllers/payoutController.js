@@ -11,6 +11,8 @@ const paystackHeaders = {
 
 // ==========================================
 // VERIFY BANK ACCOUNT (Via Paystack)
+// Still works on a Starter Business — resolving account names is allowed
+// even though transferring money to them is not.
 // ==========================================
 export const verifyBankAccount = async (req, res) => {
   try {
@@ -147,15 +149,34 @@ export const getAllPayouts = async (req, res) => {
 };
 
 // ==========================================
-// APPROVE & TRANSFER PAYOUT (Admin Only)
-// This now actually moves money via Paystack's Transfer API instead of
-// only flipping a status in the database.
+// APPROVE PAYOUT — MANUAL TRANSFER (Admin Only)
+//
+// Your Paystack account is a Starter Business, which cannot initiate
+// transfers to third-party bank accounts (Paystack blocks this outright
+// with "You cannot initiate third party payouts as a starter business").
+// So this does NOT call Paystack's Transfer API. Instead:
+//   1. The admin sends the money to the organizer themselves, via their
+//      own bank app/USSD, using payout.bankDetails shown in the admin UI.
+//   2. The admin then calls this endpoint with the bank's transaction
+//      reference as proof, and the payout is marked approved.
+//
+// If you later upgrade to a Registered Business on Paystack, this is
+// where you'd swap back in the Transfer Recipient + Transfer API calls.
+// The Payout model still has recipientCode/transferCode/
+// paystackTransferId fields reserved for that.
 // ==========================================
 export const approvePayout = async (req, res) => {
   try {
     const { id } = req.params;
+    const { paymentReference } = req.body;
 
-    // 1. Find the pending payout in the database
+    if (!paymentReference || !paymentReference.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Enter the bank transaction reference for the manual transfer before approving.'
+      });
+    }
+
     const payout = await Payout.findById(id);
 
     if (!payout) {
@@ -166,112 +187,14 @@ export const approvePayout = async (req, res) => {
       return res.status(400).json({ success: false, message: 'This payout has already been processed.' });
     }
 
-    const { accountNumber, bankCode, accountName } = payout.bankDetails || {};
-    if (!accountNumber || !bankCode) {
-      return res.status(400).json({
-        success: false,
-        message: 'This payout is missing bank details and cannot be transferred automatically.'
-      });
-    }
+    payout.status = 'approved';
+    payout.paidManually = true;
+    payout.paymentReference = paymentReference.trim();
+    await payout.save();
 
-    // ==========================================
-    // STEP 1: Create (or reuse) a Transfer Recipient
-    // ==========================================
-    let recipientCode = payout.recipientCode;
-
-    if (!recipientCode) {
-      try {
-        const recipientRes = await axios.post(
-          `${PAYSTACK_BASE}/transferrecipient`,
-          {
-            type: 'nuban',
-            name: accountName || 'Event Organizer',
-            account_number: accountNumber,
-            bank_code: bankCode,
-            currency: 'NGN'
-          },
-          { headers: paystackHeaders }
-        );
-
-        recipientCode = recipientRes.data.data.recipient_code;
-        payout.recipientCode = recipientCode;
-        await payout.save();
-      } catch (recipientError) {
-        console.error('Create transfer recipient error:', recipientError.response?.data || recipientError.message);
-        return res.status(502).json({
-          success: false,
-          message: recipientError.response?.data?.message || 'Could not create transfer recipient on Paystack.'
-        });
-      }
-    }
-
-    // ==========================================
-    // STEP 2: Initiate the Transfer
-    // ==========================================
-    let transferRes;
-    try {
-      transferRes = await axios.post(
-        `${PAYSTACK_BASE}/transfer`,
-        {
-          source: 'balance',
-          amount: Math.round(payout.amount * 100), // kobo
-          recipient: recipientCode,
-          reason: `Payout for event ${payout.event}`,
-          reference: `payout-${payout._id}`
-        },
-        { headers: paystackHeaders }
-      );
-    } catch (transferError) {
-      const data = transferError.response?.data;
-      console.error('Initiate transfer error:', data || transferError.message);
-
-      // Paystack returns 400 with a balance message when the account has insufficient funds
-      return res.status(502).json({
-        success: false,
-        message: data?.message || 'Could not initiate transfer on Paystack.'
-      });
-    }
-
-    const transferData = transferRes.data.data;
-    payout.transferCode = transferData.transfer_code;
-    payout.paystackTransferId = transferData.id;
-
-    // ==========================================
-    // STEP 3: Interpret the result
-    // Paystack returns status "success" when it completes immediately,
-    // or "otp"/"pending" when your account still requires OTP confirmation
-    // for transfers (Paystack dashboard > Settings > Preferences).
-    // ==========================================
-    if (transferData.status === 'success') {
-      payout.status = 'approved';
-      await payout.save();
-
-      return res.status(200).json({
-        success: true,
-        message: 'Payout approved and transferred successfully!',
-        payout
-      });
-    }
-
-    if (transferData.status === 'otp' || transferData.status === 'pending') {
-      payout.status = 'otp_required';
-      await payout.save();
-
-      return res.status(202).json({
-        success: false,
-        message:
-          'Transfer was created on Paystack but needs OTP confirmation before it will pay out. ' +
-          'Either confirm it from your Paystack dashboard (Payouts > Transfers), or disable the ' +
-          'Transfer OTP requirement under Paystack Settings > Preferences so future approvals complete automatically.',
-        payout
-      });
-    }
-
-    // Any other status: don't mark it approved, surface it for investigation
-    console.error('Unexpected transfer status from Paystack:', transferData.status, transferData);
-    return res.status(502).json({
-      success: false,
-      message: `Paystack returned an unexpected transfer status: ${transferData.status}. Check the Paystack dashboard.`,
+    return res.status(200).json({
+      success: true,
+      message: 'Payout marked as approved and paid manually.',
       payout
     });
 
