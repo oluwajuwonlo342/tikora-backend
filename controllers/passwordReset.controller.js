@@ -1,24 +1,44 @@
 // controllers/passwordReset.controller.js
 import crypto from "crypto";
-import nodemailer from "nodemailer";
 import User from "../models/User.js";
 
 const RESET_TOKEN_MINUTES = 30;
 
-// If you already have a nodemailer transporter / sendEmail helper for Brevo,
-// import and use that instead of this one.
-const transporter = nodemailer.createTransport({
-  host: process.env.BREVO_SMTP_HOST || "smtp-relay.brevo.com",
-  port: Number(process.env.BREVO_SMTP_PORT) || 587,
-  secure: false,
-  auth: {
-    user: process.env.BREVO_SMTP_USER,
-    pass: process.env.BREVO_SMTP_PASS,
-  },
-});
-
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
+
+// EMAIL_FROM can be either  no-reply@yourdomain.com
+// or  "Tickora" <no-reply@yourdomain.com>  -- this handles both.
+const parseSender = (from = "") => {
+  const match = from.match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/);
+  if (match) return { name: match[1].trim() || "Tickora", email: match[2].trim() };
+  return { name: "Tickora", email: from.trim() };
+};
+
+// Sends through Brevo's HTTP API (uses BREVO_API_KEY).
+// The API works over HTTPS, so it isn't blocked on hosts like Render
+// that block outbound SMTP ports.
+const sendEmail = async ({ to, subject, html }) => {
+  const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "api-key": process.env.BREVO_API_KEY,
+    },
+    body: JSON.stringify({
+      sender: parseSender(process.env.EMAIL_FROM),
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+    }),
+  });
+
+  if (!response.ok) {
+    const details = await response.text();
+    throw new Error(`Brevo API error ${response.status}: ${details}`);
+  }
+};
 
 // ---------------------------------------------------------------
 // POST /api/auth/forgot-password   body: { email }
@@ -48,11 +68,11 @@ export const forgotPassword = async (req, res) => {
     user.resetPasswordExpires = Date.now() + RESET_TOKEN_MINUTES * 60 * 1000;
     await user.save({ validateBeforeSave: false });
 
-    const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${rawToken}`;
+    const clientUrl = (process.env.CLIENT_URL || "").replace(/\/$/, "");
+    const resetUrl = `${clientUrl}/reset-password/${rawToken}`;
 
     try {
-      await transporter.sendMail({
-        from: process.env.EMAIL_FROM, // e.g. '"Tickora" <no-reply@yourdomain.com>'
+      await sendEmail({
         to: user.email,
         subject: "Reset your Tickora password",
         html: `
