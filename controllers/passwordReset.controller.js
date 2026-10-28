@@ -1,8 +1,12 @@
 // controllers/passwordReset.controller.js
 import crypto from "crypto";
+import bcrypt from "bcryptjs";
 import User from "../models/User.js";
 
 const RESET_TOKEN_MINUTES = 30;
+
+// Same password rules as register in authController.js
+const PASSWORD_REGEX = /^(?=.*[0-9])(?=.*[!@#$%^&*.,_+\-=\[\]{};':"\\|,.<>\/?]).{8,}$/;
 
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
@@ -124,10 +128,11 @@ export const resetPassword = async (req, res) => {
     const { token } = req.params;
     const { password } = req.body;
 
-    if (!password || password.length < 6) {
+    if (!password || !PASSWORD_REGEX.test(password)) {
       return res.status(400).json({
         success: false,
-        message: "Password must be at least 6 characters.",
+        message:
+          "Password must be at least 8 characters long, containing at least one number and one special character.",
       });
     }
 
@@ -144,11 +149,9 @@ export const resetPassword = async (req, res) => {
       });
     }
 
-    // IMPORTANT: this assumes your User model hashes passwords in a
-    // pre("save") hook (same as your register flow). If you hash manually
-    // in the register controller instead, hash here the same way, e.g.
-    //   user.password = await bcrypt.hash(password, 10);
-    user.password = password;
+    // Your User model has no pre("save") hook, so hash here exactly like
+    // register does (bcryptjs, 12 rounds).
+    user.password = await bcrypt.hash(password, 12);
     user.resetPasswordToken = undefined;
     user.resetPasswordExpires = undefined;
     await user.save();
