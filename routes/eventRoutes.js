@@ -14,7 +14,7 @@ import {
 
 import protect from "../middleware/authMiddleware.js";
 import { organizerOnly } from "../middleware/roleMiddleware.js";
-import { getOrganizerStats, addAuthenticator } from '../controllers/eventController.js';
+
 
 
 // Place this BEFORE dynamic routes like /:id to prevent route collision
