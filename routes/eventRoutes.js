@@ -8,6 +8,8 @@ import {
   getMyEvents,
   updateEvent,
   deleteEvent,
+  getOrganizerStats,
+  addAuthenticator,
 } from "../controllers/eventController.js";
 
 import protect from "../middleware/authMiddleware.js";
