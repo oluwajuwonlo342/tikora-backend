@@ -656,3 +656,121 @@ export const deleteEvent = async (req, res) => {
     });
   }
 };
+
+// ==========================================
+// GET ORGANIZER STATS
+// ==========================================
+
+export const getOrganizerStats = async (req, res) => {
+  try {
+    if (!req.user?._id) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required.",
+      });
+    }
+
+    const events = await Event.find({
+      organizer: req.user._id,
+    }).select("status tickets");
+
+    const totalEvents = events.length;
+
+    const publishedEvents = events.filter(
+      (event) => event.status === "published"
+    ).length;
+
+    const totalTickets = events.reduce((total, event) => {
+      return (
+        total +
+        (event.tickets || []).reduce(
+          (sum, ticket) => sum + Number(ticket.quantity || 0),
+          0
+        )
+      );
+    }, 0);
+
+    const ticketsSold = events.reduce((total, event) => {
+      return (
+        total +
+        (event.tickets || []).reduce(
+          (sum, ticket) => sum + Number(ticket.sold || 0),
+          0
+        )
+      );
+    }, 0);
+
+    return res.status(200).json({
+      success: true,
+      stats: {
+        totalEvents,
+        publishedEvents,
+        totalTickets,
+        ticketsSold,
+      },
+    });
+  } catch (error) {
+    console.error("Organizer stats error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to fetch organizer statistics.",
+    });
+  }
+};
+
+// ==========================================
+// ADD EVENT AUTHENTICATOR
+// ==========================================
+
+export const addAuthenticator = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { authenticator } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid event ID.",
+      });
+    }
+
+    if (!req.user?._id) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required.",
+      });
+    }
+
+    const event = await Event.findById(id);
+
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found.",
+      });
+    }
+
+    if (event.organizer.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not authorized to manage this event.",
+      });
+    }
+
+    // This endpoint needs a defined Event schema field and
+    // authenticator assignment rules before it can save anything.
+    return res.status(501).json({
+      success: false,
+      message:
+        "Authenticator assignment is not configured yet. Define the authenticator field and assignment rules in the Event model first.",
+    });
+  } catch (error) {
+    console.error("Add authenticator error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to add authenticator.",
+    });
+  }
+};
