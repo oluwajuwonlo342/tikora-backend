@@ -5,6 +5,10 @@ import {
   login,
 } from "../controllers/authController.js";
 import { forgotPassword, resetPassword } from "../controllers/passwordReset.controller.js";
+import { updateProfile, changePassword } from "../controllers/accountController.js";
+
+router.put("/profile", protect, updateProfile);
+router.put("/change-password", protect, changePassword);
 const router = express.Router();
 
 router.post("/register", register);
