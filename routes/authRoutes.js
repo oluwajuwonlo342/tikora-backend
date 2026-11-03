@@ -6,7 +6,7 @@ import {
 } from "../controllers/authController.js";
 import { forgotPassword, resetPassword } from "../controllers/passwordReset.controller.js";
 import { updateProfile, changePassword } from "../controllers/accountController.js";
-import { protect } from "../middleware/authMiddleware.js";
+import protect from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
