@@ -112,10 +112,10 @@ const PAID_STATUSES = ['approved'];
 const PENDING_STATUSES = ['pending', 'otp_required'];
 
 export const calculateEventBalance = async (eventId) => {
-  const validTickets = await Ticket.find({
-    event: eventId,
-    status: { $ne: 'cancelled' }
-  }).select('ticketPrice');
+  const allTickets = await Ticket.find({ event: eventId }).select('ticketPrice status');
+
+  const validTickets = allTickets.filter((t) => t.status !== 'cancelled');
+  const cancelledTickets = allTickets.filter((t) => t.status === 'cancelled');
 
   const totalEarned = validTickets.reduce(
     (sum, ticket) => sum + (Number(ticket.ticketPrice) || 0),
@@ -142,7 +142,11 @@ export const calculateEventBalance = async (eventId) => {
     paid,
     pending,
     available,
-    ticketCount: validTickets.length
+    ticketCount: validTickets.length,
+    // Diagnostics: these explain any difference from other screens
+    cancelledCount: cancelledTickets.length,
+    cancelledValue: cancelledTickets.reduce((sum, t) => sum + (Number(t.ticketPrice) || 0), 0),
+    unpricedTickets: validTickets.filter((t) => !(Number(t.ticketPrice) > 0)).length
   };
 };
 
@@ -170,6 +174,29 @@ export const getPayoutBalance = async (req, res) => {
   } catch (error) {
     console.error('Get payout balance error:', error);
     return res.status(500).json({ success: false, message: 'Could not load balance.' });
+  }
+};
+
+// ==========================================
+// GET BALANCES FOR ALL OF AN ORGANIZER'S EVENTS
+// GET /api/payouts/my-balances
+// Returns { balances: { [eventId]: { totalEarned, paid, pending, available, ... } } }
+// ==========================================
+export const getMyEventBalances = async (req, res) => {
+  try {
+    const events = await Event.find({ organizer: req.user._id }).select('_id');
+
+    const balances = {};
+    await Promise.all(
+      events.map(async (event) => {
+        balances[event._id.toString()] = await calculateEventBalance(event._id);
+      })
+    );
+
+    return res.status(200).json({ success: true, balances });
+  } catch (error) {
+    console.error('Get my balances error:', error);
+    return res.status(500).json({ success: false, message: 'Could not load balances.' });
   }
 };
 
