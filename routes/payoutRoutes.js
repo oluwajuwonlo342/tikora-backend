@@ -8,6 +8,7 @@ import {
   getAllPayouts,      // <-- Make sure this is imported!
   approvePayout       // <-- Make sure this is imported!
 } from '../controllers/payoutController.js';
+  import { rejectPayout } from "../controllers/rejectPayoutController.js";
 
 const router = express.Router();
 
@@ -20,5 +21,6 @@ router.get('/my-payouts', protect, getOrganizerPayouts);
 // ADMIN ROUTES (This is the one your frontend is looking for!)
 router.get('/admin/all', protect, admin, getAllPayouts);
 router.post('/admin/approve/:id', protect, admin, approvePayout);
+   router.post("/admin/reject/:id",
 
 export default router;
