@@ -12,13 +12,6 @@ const paystackHeaders = {
 // ==========================================
 // GET BANK LIST (Via Paystack)
 //
-// Replaces a hardcoded bank list on the frontend. Paystack's /bank
-// endpoint returns every bank it supports, with the exact bank_code
-// each one needs for /bank/resolve and transfers. A hand-typed list
-// goes stale and can have wrong codes, which is why some banks never
-// resolved an account name — the code sent didn't match what Paystack
-// expects.
-//
 // Cached in memory for 24h since the bank list rarely changes and
 // this avoids hitting Paystack on every payout form load.
 // ==========================================
@@ -43,8 +36,7 @@ export const getBanks = async (req, res) => {
     });
 
     // Only keep NUBAN-type banks — these are the ones /bank/resolve and
-    // transfers actually work with. Non-NUBAN entries would otherwise
-    // show up as selectable but fail verification every time.
+    // transfers actually work with.
     const banks = (response.data.data || [])
       .filter((b) => b.type === 'nuban' && b.active !== false)
       .map((b) => ({ code: b.code, name: b.name }))
@@ -100,6 +92,88 @@ export const verifyBankAccount = async (req, res) => {
 };
 
 // ==========================================
+// SHARED BALANCE CALCULATION
+//
+// ONE place that works out how much an organizer can still withdraw
+// for an event. Both the payout form (via GET /payouts/balance/:eventId)
+// and the payout request check use this, so the number the organizer
+// sees is always the number the server enforces.
+//
+//   totalEarned = ticket prices of all non-cancelled tickets
+//                 (the platform fee is charged on top, so the organizer
+//                 keeps the exact ticketPrice)
+//   paid        = payouts already approved
+//   pending     = payouts requested and waiting for approval
+//   available   = totalEarned - paid - pending
+//
+// Rejected payouts are NOT counted, so that money goes back to the organizer.
+// ==========================================
+const PAID_STATUSES = ['approved'];
+const PENDING_STATUSES = ['pending', 'otp_required'];
+
+export const calculateEventBalance = async (eventId) => {
+  const validTickets = await Ticket.find({
+    event: eventId,
+    status: { $ne: 'cancelled' }
+  }).select('ticketPrice');
+
+  const totalEarned = validTickets.reduce(
+    (sum, ticket) => sum + (Number(ticket.ticketPrice) || 0),
+    0
+  );
+
+  const payouts = await Payout.find({
+    event: eventId,
+    status: { $in: [...PAID_STATUSES, ...PENDING_STATUSES] }
+  }).select('amount status');
+
+  const paid = payouts
+    .filter((p) => PAID_STATUSES.includes(p.status))
+    .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+
+  const pending = payouts
+    .filter((p) => PENDING_STATUSES.includes(p.status))
+    .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+
+  const available = Math.max(totalEarned - paid - pending, 0);
+
+  return {
+    totalEarned,
+    paid,
+    pending,
+    available,
+    ticketCount: validTickets.length
+  };
+};
+
+// ==========================================
+// GET BALANCE FOR ONE EVENT (Organizer or Admin)
+// GET /api/payouts/balance/:eventId
+// ==========================================
+export const getPayoutBalance = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({ success: false, message: 'Event not found.' });
+    }
+
+    const isOwner = event.organizer.toString() === req.user._id.toString();
+    if (!isOwner && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Unauthorized. You do not own this event.' });
+    }
+
+    const balance = await calculateEventBalance(eventId);
+
+    return res.status(200).json({ success: true, balance });
+  } catch (error) {
+    console.error('Get payout balance error:', error);
+    return res.status(500).json({ success: false, message: 'Could not load balance.' });
+  }
+};
+
+// ==========================================
 // REQUEST PAYOUT (Organizer)
 // ==========================================
 export const requestPayout = async (req, res) => {
@@ -128,34 +202,20 @@ export const requestPayout = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Unauthorized. You do not own this event.' });
     }
 
-    // 2. Calculate Total Earned (Sum of all valid ticket prices)
-    const validTickets = await Ticket.find({ 
-      event: eventId, 
-      status: { $ne: 'cancelled' } 
-    });
+    // 2. Work out the balance (same calculation the form displays)
+    const { totalEarned, paid, pending, available } = await calculateEventBalance(eventId);
 
-    // The organizer keeps the exact ticketPrice (platform fee was charged on top)
-    const totalEarned = validTickets.reduce((sum, ticket) => sum + (ticket.ticketPrice || 0), 0);
-
-    // 3. Calculate Already Requested / Paid Out
-    const existingPayouts = await Payout.find({ 
-      event: eventId, 
-      status: { $in: ['pending', 'otp_required', 'approved'] } 
-    });
-
-    const alreadyRequested = existingPayouts.reduce((sum, payout) => sum + payout.amount, 0);
-
-    // 4. Determine Available Balance
-    const availableBalance = totalEarned - alreadyRequested;
-
-    if (availableBalance <= 0 || amount > availableBalance) {
-      return res.status(400).json({ 
-        success: false, 
-        message: `Insufficient balance. Your available balance is ₦${availableBalance}.` 
+    if (available <= 0 || amount > available) {
+      return res.status(400).json({
+        success: false,
+        message:
+          `Insufficient balance. Available: ₦${available.toLocaleString()} ` +
+          `(earned ₦${totalEarned.toLocaleString()}, paid ₦${paid.toLocaleString()}, ` +
+          `pending ₦${pending.toLocaleString()}).`
       });
     }
 
-    // 5. Create the Pending Payout Request
+    // 3. Create the Pending Payout Request
     const payout = await Payout.create({
       organizer: req.user._id,
       event: eventId,
@@ -164,10 +224,10 @@ export const requestPayout = async (req, res) => {
       status: 'pending'
     });
 
-    return res.status(201).json({ 
-      success: true, 
-      message: 'Payout request submitted successfully and is pending admin approval.', 
-      payout 
+    return res.status(201).json({
+      success: true,
+      message: 'Payout request submitted successfully and is pending admin approval.',
+      payout
     });
 
   } catch (error) {
@@ -191,7 +251,6 @@ export const getOrganizerPayouts = async (req, res) => {
     return res.status(500).json({ success: false, message: 'Unable to load payouts.' });
   }
 };
-
 
 // ==========================================
 // GET ALL PAYOUTS (Admin Only)
