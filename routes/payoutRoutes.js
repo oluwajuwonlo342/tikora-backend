@@ -21,6 +21,6 @@ router.get('/my-payouts', protect, getOrganizerPayouts);
 // ADMIN ROUTES (This is the one your frontend is looking for!)
 router.get('/admin/all', protect, admin, getAllPayouts);
 router.post('/admin/approve/:id', protect, admin, approvePayout);
-   router.post("/admin/reject/:id",
+ router.post("/admin/reject/:id", protect, admin, rejectPayout);
 
 export default router;
