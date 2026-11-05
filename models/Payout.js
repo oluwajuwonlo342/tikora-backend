@@ -65,6 +65,8 @@ const payoutSchema = new mongoose.Schema(
     paystackTransferId: {
       type: Number,
     },
+       rejectionReason: String,
+   rejectedAt: Date,
     paystackTransferReference: {
       type: String,
       default: '',
