@@ -8,7 +8,7 @@ import {
   getAllPayouts,      // <-- Make sure this is imported!
   approvePayout       // <-- Make sure this is imported!
 } from '../controllers/payoutController.js';
-  import { rejectPayout } from "../controllers/rejectPayoutController.js";
+  import { rejectPayout, getPayoutBalance, getMyEventBalances } from "../controllers/rejectPayoutController.js";
 
 const router = express.Router();
 
@@ -22,5 +22,7 @@ router.get('/my-payouts', protect, getOrganizerPayouts);
 router.get('/admin/all', protect, admin, getAllPayouts);
 router.post('/admin/approve/:id', protect, admin, approvePayout);
  router.post("/admin/reject/:id", protect, admin, rejectPayout);
+router.get("/balance/:eventId", protect, getPayoutBalance);
+router.get("/my-balances", protect, getMyEventBalances);
 
 export default router;
