@@ -5,7 +5,7 @@ import {
   getOrganizerPayouts, 
   verifyBankAccount,
   getBanks,           // <-- Live Paystack bank list
-  getAllPayouts,getPayoutBalance, getMyEventBalances      // <-- Make sure this is imported!
+  getAllPayouts,getPayoutBalance, getMyEventBalances,      // <-- Make sure this is imported!
   approvePayout       // <-- Make sure this is imported!
 } from '../controllers/payoutController.js';
   import { rejectPayout } from "../controllers/rejectPayoutController.js";
