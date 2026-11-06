@@ -12,16 +12,10 @@ import {
   addAuthenticator,
   getEventAttendees,
   sendBulkEmailToAttendees,
-  
 } from "../controllers/eventController.js";
 
 import protect from "../middleware/authMiddleware.js";
 import { organizerOnly } from "../middleware/roleMiddleware.js";
-
-
-
-// Place this BEFORE dynamic routes like /:id to prevent route collision
-
 
 const router = express.Router();
 
@@ -38,21 +32,36 @@ const upload = multer({
 
 router.get("/", getEvents);
 
-
 // ==========================================
 // ORGANIZER EVENTS
 // ==========================================
 
 // IMPORTANT:
 // /my-events MUST come before /:id
-
 router.get(
   "/my-events",
   protect,
   organizerOnly,
   getMyEvents
 );
+
 router.get('/organizer/stats', protect, getOrganizerStats);
+
+// ==========================================
+// EVENT MANAGEMENT (ATTENDEES & EMAILS)
+// ==========================================
+
+router.get(
+  '/:id/attendees', 
+  protect, 
+  getEventAttendees
+);
+
+router.post(
+  '/:id/send-email', 
+  protect, 
+  sendBulkEmailToAttendees
+);
 
 // ==========================================
 // ADD AUTHENTICATOR
@@ -65,13 +74,11 @@ router.post(
   addAuthenticator
 );
 
-
 // ==========================================
 // SINGLE EVENT
 // ==========================================
 
 router.get("/:id", getEventById);
-
 
 // ==========================================
 // CREATE EVENT
@@ -85,7 +92,6 @@ router.post(
   createEvent
 );
 
-
 // ==========================================
 // UPDATE EVENT
 // ==========================================
@@ -98,7 +104,6 @@ router.put(
   updateEvent
 );
 
-
 // ==========================================
 // DELETE EVENT
 // ==========================================
@@ -109,6 +114,5 @@ router.delete(
   organizerOnly,
   deleteEvent
 );
-router.get('/:id/attendees', protect, eventController.getEventAttendees);
-router.post('/:id/send-email', protect, eventController.sendBulkEmailToAttendees);
+
 export default router;
