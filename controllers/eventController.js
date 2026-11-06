@@ -906,37 +906,29 @@ export const getEventAttendees = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
-    // Fetch tickets and try to populate 'user' or 'buyer' depending on your schema
+    // FIX: Only populate 'buyer', because 'user' does not exist in the Ticket schema
     const tickets = await Ticket.find({ event: id })
-      .populate('user', 'name email')
       .populate('buyer', 'name email')
       .lean();
-
-    // --- DEBUGGER: Check your server logs when you click "Manage" ---
-    console.log(`\n=== ATTENDEE DEBUG INFO ===`);
-    console.log(`Looking for Event ID: ${id}`);
-    console.log(`Total tickets found in database: ${tickets.length}`);
-    if (tickets.length > 0) {
-      console.log(`Sample Ticket Data:`, JSON.stringify(tickets[0], null, 2));
-    }
-    console.log(`===========================\n`);
 
     res.status(200).json({
       success: true,
       attendees: tickets.map(t => ({
         ticketId: t._id,
-        ticketCode: t.ticketCode || t.reference || t._id,
+        ticketCode: t.ticketCode || t._id,
         
-        // Catch-all fallbacks for however the user's name/email is stored
-        userName: t.userName || t.buyerName || t.user?.name || t.buyer?.name || 'Guest User',
-        userEmail: t.userEmail || t.buyerEmail || t.user?.email || t.buyer?.email || 'N/A',
+        // Safely extract the attendee name or fallback to the buyer's name
+        userName: t.attendee?.firstName 
+          ? `${t.attendee.firstName} ${t.attendee.lastName || ''}`.trim() 
+          : (t.buyer?.name || 'Guest User'),
+          
+        userEmail: t.attendee?.email || t.buyer?.email || 'N/A',
         
-        // Fallbacks for tier name and price
-        ticketTier: t.ticketTierName || t.tierName || t.ticketType || 'Standard',
-        price: t.price || t.amount || t.ticketPrice || 0,
+        ticketTier: t.ticketType || 'Standard',
+        price: t.ticketPrice || t.price || 0,
         
-        isScanned: t.isScanned || t.status === 'used' || false,
-        scannedAt: t.scannedAt || null,
+        isScanned: t.status === 'used' || false,
+        scannedAt: t.usedAt || null,
         purchasedAt: t.createdAt
       }))
     });
@@ -945,7 +937,6 @@ export const getEventAttendees = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error fetching attendees' });
   }
 };
-
 // ==========================================
 // SEND BULK EMAIL TO ATTENDEES
 // ==========================================
