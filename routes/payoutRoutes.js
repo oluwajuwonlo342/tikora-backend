@@ -5,7 +5,7 @@ import {
   getOrganizerPayouts, 
   verifyBankAccount,
   getBanks,           // <-- Live Paystack bank list
-  getAllPayouts,getPayoutBalance, getMyEventBalances,      // <-- Make sure this is imported!
+  getAllPayouts,getPayoutBalance, getMyEventBalances,getAllEventBalances,      // <-- Make sure this is imported!
   approvePayout       // <-- Make sure this is imported!
 } from '../controllers/payoutController.js';
   import { rejectPayout } from "../controllers/rejectPayoutController.js";
@@ -23,6 +23,7 @@ router.get('/admin/all', protect, admin, getAllPayouts);
 router.post('/admin/approve/:id', protect, admin, approvePayout);
  router.post("/admin/reject/:id", protect, admin, rejectPayout);
 router.get("/balance/:eventId", protect, getPayoutBalance);
+router.get("/admin/event-balances", protect, admin, getAllEventBalances);
 router.get("/my-balances", protect, getMyEventBalances);
 
 export default router;
