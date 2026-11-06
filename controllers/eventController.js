@@ -4,7 +4,7 @@ import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
 import Payout from "../models/Payout.js";
 import cloudinary from "../config/cloudinary.js";
-
+const sendEmail = require('../utils/sendEmail');
 // ==========================================
 // EMAIL HELPERS - BREVO HTTP API
 // ==========================================
@@ -938,5 +938,93 @@ export const addAuthenticator = async (req, res) => {
       success: false,
       message: "Failed to process invitation.",
     });
+  }
+};
+// 1. Get all attendees for a specific event
+exports.getEventAttendees = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const event = await Event.findById(id);
+    
+    if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
+
+    // Verify requesting user is the organizer or admin
+    if (event.organizer.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    const tickets = await Ticket.find({ event: id }).populate('user', 'name email');
+
+    res.status(200).json({
+      success: true,
+      attendees: tickets.map(t => ({
+        ticketId: t._id,
+        ticketCode: t.ticketCode || t._id,
+        userName: t.userName || t.user?.name || 'Guest User',
+        userEmail: t.userEmail || t.user?.email || 'N/A',
+        ticketTier: t.ticketTierName || t.tierName || 'Standard',
+        price: t.price || 0,
+        isScanned: t.isScanned || false,
+        scannedAt: t.scannedAt || null,
+        purchasedAt: t.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching attendees:', error);
+    res.status(500).json({ success: false, message: 'Server error fetching attendees' });
+  }
+};
+
+// 2. Send Bulk Email to Attendees of a Specific Event
+exports.sendBulkEmailToAttendees = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { subject, message } = req.body;
+
+    if (!subject || !message) {
+      return res.status(400).json({ success: false, message: 'Subject and message are required' });
+    }
+
+    const event = await Event.findById(id);
+    if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
+
+    if (event.organizer.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    const tickets = await Ticket.find({ event: id }).populate('user', 'email');
+    
+    // Extract unique recipient emails
+    const emails = [...new Set(
+      tickets.map(t => t.userEmail || t.user?.email).filter(Boolean)
+    )];
+
+    if (emails.length === 0) {
+      return res.status(400).json({ success: false, message: 'No attendee emails found for this event.' });
+    }
+
+    // Send broadcast email to all attendees
+    for (const email of emails) {
+      await sendEmail({
+        to: email,
+        subject: `[${event.title}] ${subject}`,
+        html: `
+          <div style="font-family: sans-serif; padding: 20px; line-height: 1.6;">
+            <h2>Update from ${event.title} Organizer</h2>
+            <p>${message.replace(/\n/g, '<br>')}</p>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+            <small style="color: #888;">You received this email because you hold a ticket for ${event.title}.</small>
+          </div>
+        `
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Broadcast email sent successfully to ${emails.length} attendee(s).`
+    });
+  } catch (error) {
+    console.error('Error sending bulk email:', error);
+    res.status(500).json({ success: false, message: 'Failed to send broadcast email' });
   }
 };
