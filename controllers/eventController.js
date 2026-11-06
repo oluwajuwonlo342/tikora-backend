@@ -1,63 +1,13 @@
-
 import mongoose from "mongoose";
 import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
 import Payout from "../models/Payout.js";
 import cloudinary from "../config/cloudinary.js";
 import { sendBrevoEmail } from '../utils/bevoMail.js';
+
 // ==========================================
-// EMAIL HELPERS - BREVO HTTP API
+// HELPERS
 // ==========================================
-
-const sendBrevoEmail = async ({ to, toName, subject, html }) => {
-  if (!process.env.BREVO_API_KEY) {
-    throw new Error("BREVO_API_KEY is not set.");
-  }
-
-  const senderEmail = process.env.EMAIL_FROM;
-
-  if (!senderEmail) {
-    throw new Error("EMAIL_FROM is not set.");
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-
-  try {
-    const response = await fetch("https://api.brevo.com/v3/smtp/email", {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-        "api-key": process.env.BREVO_API_KEY,
-      },
-      body: JSON.stringify({
-        sender: {
-          name: "Tikora Scanner Auth",
-          email: senderEmail,
-        },
-        to: [{ email: to, name: toName }],
-        subject,
-        htmlContent: html,
-      }),
-      signal: controller.signal,
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      throw new Error(
-        `Brevo API ${response.status}: ${
-          data.message || JSON.stringify(data)
-        }`
-      );
-    }
-
-    return data;
-  } finally {
-    clearTimeout(timeout);
-  }
-};
 
 const escapeHtml = (value = "") =>
   String(value)
@@ -940,7 +890,11 @@ export const addAuthenticator = async (req, res) => {
     });
   }
 };
-// 1. Get all attendees for a specific event
+
+// ==========================================
+// GET EVENT ATTENDEES (ORGANIZER/ADMIN)
+// ==========================================
+
 export const getEventAttendees = async (req, res) => {
   try {
     const { id } = req.params;
@@ -975,7 +929,10 @@ export const getEventAttendees = async (req, res) => {
   }
 };
 
-// 2. Send Bulk Email to Attendees of a Specific Event
+// ==========================================
+// SEND BULK EMAIL TO ATTENDEES
+// ==========================================
+
 export const sendBulkEmailToAttendees = async (req, res) => {
   try {
     const { id } = req.params;
