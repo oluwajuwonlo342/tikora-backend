@@ -2,6 +2,10 @@ import Payout from '../models/Payout.js';
 import Ticket from '../models/Ticket.js';
 import Event from '../models/Event.js';
 import axios from 'axios';
+import {
+  sendPayoutRequestedEmails,
+  sendPayoutApprovedEmail
+} from '../utils/payoutEmails.js';
 
 const PAYSTACK_BASE = 'https://api.paystack.co';
 const paystackHeaders = {
@@ -226,6 +230,41 @@ export const getMyEventBalances = async (req, res) => {
 };
 
 // ==========================================
+// PENDING PAYOUT SUMMARY (Admin Only)
+// GET /api/payouts/admin/pending-summary
+// Very light request the admin dashboard checks every 30 seconds
+// so it can notify the admin of new payout requests.
+// ==========================================
+export const getPendingPayoutSummary = async (req, res) => {
+  try {
+    const [count, latest] = await Promise.all([
+      Payout.countDocuments({ status: 'pending' }),
+      Payout.find({ status: 'pending' })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select('amount event organizer createdAt')
+        .populate('event', 'title')
+        .populate('organizer', 'name')
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      count,
+      latest: latest.map((p) => ({
+        _id: p._id,
+        amount: p.amount,
+        organizerName: p.organizer?.name || null,
+        eventTitle: p.event?.title || null,
+        createdAt: p.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error('Pending payout summary error:', error);
+    return res.status(500).json({ success: false, message: 'Could not load pending payouts.' });
+  }
+};
+
+// ==========================================
 // GET BALANCES FOR EVERY EVENT (Admin Only)
 // GET /api/payouts/admin/event-balances
 // Used by the admin Event Moderation table.
@@ -298,6 +337,13 @@ export const requestPayout = async (req, res) => {
       bankDetails,
       status: 'pending'
     });
+
+    // Email the organizer (request received) and the admin (new request), in the background
+    sendPayoutRequestedEmails({
+      payout,
+      organizer: req.user,
+      eventTitle: event.title
+    }).catch((err) => console.error('Payout request emails error:', err.message));
 
     return res.status(201).json({
       success: true,
@@ -380,6 +426,17 @@ export const approvePayout = async (req, res) => {
     payout.paidManually = true;
     payout.paymentReference = paymentReference.trim();
     await payout.save();
+
+    // Load the organizer and event names so the approval email can use them
+    await payout.populate([
+      { path: 'organizer', select: 'name email' },
+      { path: 'event', select: 'title' }
+    ]);
+
+    // Email the organizer in the background
+    sendPayoutApprovedEmail({ payout }).catch((err) =>
+      console.error('Payout approval email error:', err.message)
+    );
 
     return res.status(200).json({
       success: true,
