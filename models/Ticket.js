@@ -1,67 +1,78 @@
 import mongoose from 'mongoose';
 
 const ticketSchema = new mongoose.Schema({
-  ticketCode: { 
-    type: String, 
-    required: true, 
-    unique: true 
+  ticketCode: {
+    type: String,
+    required: true,
+    unique: true
   },
-  qrCode: { 
-    type: String, 
-    required: true 
+  qrCode: {
+    type: String,
+    required: true
   },
-  buyer: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User', 
-    required: true 
+  buyer: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
   },
-  event: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'Event', 
-    required: true 
+  event: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Event',
+    required: true
   },
-  organizer: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User', 
-    required: true 
+  organizer: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
   },
-  ticketType: { 
-    type: String, 
-    required: true 
+  ticketType: {
+    type: String,
+    required: true
   },
-  ticketPrice: { 
-    type: Number, 
-    required: true 
+  // FIX: controller sets `price`, but it was missing from the schema (silently dropped)
+  price: {
+    type: Number,
+    default: 0
   },
-  platformFee: { 
-    type: Number, 
-    required: true 
+  ticketPrice: {
+    type: Number,
+    required: true
   },
-  totalAmount: { 
-    type: Number, 
-    required: true 
+  platformFee: {
+    type: Number,
+    required: true
   },
-  paymentReference: { 
-    type: String, 
-    required: true 
+  totalAmount: {
+    type: Number,
+    required: true
   },
-  
-  // NEW: Added Attendee Information object
-  attendee: {
-    firstName: { type: String, required: true },
-    lastName: { type: String, required: true },
-    email: { type: String, required: true },
-    phone: { type: String, required: true }
+  // Shared by every ticket in one purchase, so it is indexed but NOT unique
+  paymentReference: {
+    type: String,
+    required: true,
+    index: true
   },
 
-  status: { 
-    type: String, 
-    enum: ['valid', 'used', 'cancelled'], 
-    default: 'valid' 
+  attendee: {
+    firstName: { type: String, required: true },
+    // FIX: no longer required. Empty strings fail "required" in Mongoose,
+    // which made insertMany throw for attendees without a last name or phone.
+    lastName: { type: String, default: '' },
+    email: { type: String, required: true },
+    phone: { type: String, default: '' }
   },
-  usedAt: { 
-    type: Date 
+
+  status: {
+    type: String,
+    enum: ['valid', 'used', 'cancelled'],
+    default: 'valid'
+  },
+  usedAt: {
+    type: Date
   }
 }, { timestamps: true });
+
+// Fast lookup of tickets sent to an attendee's email
+ticketSchema.index({ 'attendee.email': 1 });
 
 export default mongoose.model('Ticket', ticketSchema);
