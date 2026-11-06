@@ -111,7 +111,7 @@ export const initializePurchase = async (req, res) => {
     }
 
     const buyerEmail = req.user ? req.user.email : attendees[0].email;
-    const buyerId = req.user ? req.user._id : null; 
+    let buyerId = req.user ? req.user._id : null; 
 
     const subtotal = tier.price * qty;
     const platformFee = subtotal * 0.07;
@@ -123,9 +123,20 @@ export const initializePurchase = async (req, res) => {
     if (totalAmount === 0) {
       const freeReference = `FREE-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
       
-      tier.sold += qty;
-      event.eventTicketsSold = (event.eventTicketsSold || 0) + qty;
-      await event.save();
+      // FIX: Handle Guest User for Free Tickets to prevent insertMany crash
+      if (!buyerId) {
+        let guestUser = await User.findOne({ email: buyerEmail });
+        if (!guestUser) {
+          const randomPassword = crypto.randomBytes(8).toString('hex');
+          guestUser = await User.create({
+            name: attendees[0]?.firstName || 'Guest User',
+            email: buyerEmail,
+            password: randomPassword,
+            role: 'user'
+          });
+        }
+        buyerId = guestUser._id;
+      }
 
       const ticketsToCreate = [];
       for (let i = 0; i < attendees.length; i++) {
@@ -146,7 +157,8 @@ export const initializePurchase = async (req, res) => {
           ticketPrice: 0,        
           platformFee: 0,        
           totalAmount: 0,        
-          paymentReference: `${freeReference}-${i}`,     
+          paymentReference: `${freeReference}-${i}`,
+          status: 'active', // FIX: Explicitly set status to active
           attendee: {
             firstName: attendee.firstName || attendees[0].firstName,
             lastName: attendee.lastName || attendees[0].lastName,
@@ -158,8 +170,14 @@ export const initializePurchase = async (req, res) => {
         });
       }
 
+      // FIX: Insert Tickets BEFORE modifying event counts
       const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
       await Ticket.insertMany(dbTickets);
+
+      // Now safe to update event counts
+      tier.sold += qty;
+      event.eventTicketsSold = (event.eventTicketsSold || 0) + qty;
+      await event.save();
 
       // Emails are sent in parallel over HTTPS (fast). Failures are logged only.
       await sendTicketEmails(ticketsToCreate, event, true);
@@ -269,11 +287,6 @@ export const verifyPurchase = async (req, res) => {
       finalBuyerId = guestUser._id;
     }
     
-    tier.sold += Number(quantity);
-    event.eventTicketsSold = (event.eventTicketsSold || 0) + Number(quantity);
-    event.eventRevenue = (event.eventRevenue || 0) + (txData.amount / 100); 
-    await event.save();
-
     const ticketsToCreate = [];
     const ticketPrice = tier.price;
     const platformFee = ticketPrice * 0.07;
@@ -298,7 +311,8 @@ export const verifyPurchase = async (req, res) => {
         ticketPrice: ticketPrice,        
         platformFee: platformFee,        
         totalAmount: totalAmount,        
-        paymentReference: `${reference}-${i}`,     
+        paymentReference: `${reference}-${i}`,
+        status: 'active', // FIX: Explicitly set status to active
         attendee: {
           firstName: attendee.firstName || attendees[0].firstName,
           lastName: attendee.lastName || attendees[0].lastName,
@@ -310,11 +324,17 @@ export const verifyPurchase = async (req, res) => {
       });
     }
 
+    // FIX: Insert Tickets BEFORE modifying event counts
     const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
     const savedTickets = await Ticket.insertMany(dbTickets);
 
-    // Emails are sent in parallel over HTTPS (fast). Failures are logged only,
-    // so a mail problem can never turn a successful purchase into an error.
+    // Now safe to update event counts
+    tier.sold += Number(quantity);
+    event.eventTicketsSold = (event.eventTicketsSold || 0) + Number(quantity);
+    event.eventRevenue = (event.eventRevenue || 0) + (txData.amount / 100); 
+    await event.save();
+
+    // Emails are sent in parallel over HTTPS (fast). Failures are logged only.
     await sendTicketEmails(ticketsToCreate, event, false);
 
     return res.status(200).json({ success: true, message: "Tickets generated successfully", tickets: savedTickets });
@@ -358,7 +378,6 @@ export const getTicketById = async (req, res) => {
       return res.status(404).json({ success: false, message: "Ticket not found." });
     }
 
-    // buyer can be null for free tickets bought by guests, so use optional chaining
     const isBuyer = ticket.buyer?._id?.toString() === req.user._id.toString();
     const isOrganizer = ticket.organizer?._id?.toString() === req.user._id.toString();
 
