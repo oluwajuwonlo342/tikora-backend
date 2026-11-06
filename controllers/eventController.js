@@ -957,11 +957,12 @@ export const sendBulkEmailToAttendees = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
+    // Populate buyer just in case attendee email is missing
     const tickets = await Ticket.find({ event: id }).populate('buyer', 'email');
     
-    // Extract unique recipient emails
+    // FIX: Map using the correct updated schema fields (attendee and buyer)
     const emails = [...new Set(
-      tickets.map(t => t.userEmail || t.user?.email).filter(Boolean)
+      tickets.map(t => t.attendee?.email || t.buyer?.email).filter(Boolean)
     )];
 
     if (emails.length === 0) {
@@ -969,8 +970,9 @@ export const sendBulkEmailToAttendees = async (req, res) => {
     }
 
     // Send broadcast email to all attendees using Brevo API
-    for (const email of emails) {
-      await sendBrevoEmail({
+    // Using Promise.allSettled makes it faster and prevents one bad email from crashing the rest
+    const emailPromises = emails.map(email => 
+      sendBrevoEmail({
         to: email,
         subject: `[${event.title}] ${subject}`,
         html: `
@@ -982,8 +984,10 @@ export const sendBulkEmailToAttendees = async (req, res) => {
           </div>
         `,
         senderName: "Tickora"
-      });
-    }
+      })
+    );
+
+    await Promise.allSettled(emailPromises);
 
     res.status(200).json({
       success: true,
