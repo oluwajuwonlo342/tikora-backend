@@ -106,5 +106,6 @@ router.delete(
   organizerOnly,
   deleteEvent
 );
-
+router.get('/:id/attendees', protect, eventController.getEventAttendees);
+router.post('/:id/send-email', protect, eventController.sendBulkEmailToAttendees);
 export default router;
