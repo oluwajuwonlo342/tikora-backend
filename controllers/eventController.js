@@ -4,7 +4,7 @@ import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
 import Payout from "../models/Payout.js";
 import cloudinary from "../config/cloudinary.js";
-const sendEmail = require('../utils/sendEmail');
+import { sendBrevoEmail } from '../utils/bevoMail.js';
 // ==========================================
 // EMAIL HELPERS - BREVO HTTP API
 // ==========================================
@@ -941,7 +941,7 @@ export const addAuthenticator = async (req, res) => {
   }
 };
 // 1. Get all attendees for a specific event
-exports.getEventAttendees = async (req, res) => {
+export const getEventAttendees = async (req, res) => {
   try {
     const { id } = req.params;
     const event = await Event.findById(id);
@@ -976,7 +976,7 @@ exports.getEventAttendees = async (req, res) => {
 };
 
 // 2. Send Bulk Email to Attendees of a Specific Event
-exports.sendBulkEmailToAttendees = async (req, res) => {
+export const sendBulkEmailToAttendees = async (req, res) => {
   try {
     const { id } = req.params;
     const { subject, message } = req.body;
@@ -1003,9 +1003,9 @@ exports.sendBulkEmailToAttendees = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No attendee emails found for this event.' });
     }
 
-    // Send broadcast email to all attendees
+    // Send broadcast email to all attendees using Brevo API
     for (const email of emails) {
-      await sendEmail({
+      await sendBrevoEmail({
         to: email,
         subject: `[${event.title}] ${subject}`,
         html: `
@@ -1015,7 +1015,8 @@ exports.sendBulkEmailToAttendees = async (req, res) => {
             <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
             <small style="color: #888;">You received this email because you hold a ticket for ${event.title}.</small>
           </div>
-        `
+        `,
+        senderName: "Tickora"
       });
     }
 
