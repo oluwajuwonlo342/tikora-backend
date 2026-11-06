@@ -890,7 +890,6 @@ export const addAuthenticator = async (req, res) => {
     });
   }
 };
-
 // ==========================================
 // GET EVENT ATTENDEES (ORGANIZER/ADMIN)
 // ==========================================
@@ -907,18 +906,36 @@ export const getEventAttendees = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
-    const tickets = await Ticket.find({ event: id }).populate('user', 'name email');
+    // Fetch tickets and try to populate 'user' or 'buyer' depending on your schema
+    const tickets = await Ticket.find({ event: id })
+      .populate('user', 'name email')
+      .populate('buyer', 'name email')
+      .lean();
+
+    // --- DEBUGGER: Check your server logs when you click "Manage" ---
+    console.log(`\n=== ATTENDEE DEBUG INFO ===`);
+    console.log(`Looking for Event ID: ${id}`);
+    console.log(`Total tickets found in database: ${tickets.length}`);
+    if (tickets.length > 0) {
+      console.log(`Sample Ticket Data:`, JSON.stringify(tickets[0], null, 2));
+    }
+    console.log(`===========================\n`);
 
     res.status(200).json({
       success: true,
       attendees: tickets.map(t => ({
         ticketId: t._id,
-        ticketCode: t.ticketCode || t._id,
-        userName: t.userName || t.user?.name || 'Guest User',
-        userEmail: t.userEmail || t.user?.email || 'N/A',
-        ticketTier: t.ticketTierName || t.tierName || 'Standard',
-        price: t.price || 0,
-        isScanned: t.isScanned || false,
+        ticketCode: t.ticketCode || t.reference || t._id,
+        
+        // Catch-all fallbacks for however the user's name/email is stored
+        userName: t.userName || t.buyerName || t.user?.name || t.buyer?.name || 'Guest User',
+        userEmail: t.userEmail || t.buyerEmail || t.user?.email || t.buyer?.email || 'N/A',
+        
+        // Fallbacks for tier name and price
+        ticketTier: t.ticketTierName || t.tierName || t.ticketType || 'Standard',
+        price: t.price || t.amount || t.ticketPrice || 0,
+        
+        isScanned: t.isScanned || t.status === 'used' || false,
         scannedAt: t.scannedAt || null,
         purchasedAt: t.createdAt
       }))
