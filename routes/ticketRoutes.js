@@ -4,7 +4,8 @@ import {
   verifyPurchase,
   getMyTickets,
   getTicketById,
-  verifyAndCheckInTicket 
+  verifyAndCheckInTicket,
+  paystackWebhook,
 } from '../controllers/ticketController.js';
 
 import protect, { optionalProtect } from '../middleware/authMiddleware.js';
@@ -22,5 +23,6 @@ router.post('/scan', protect, verifyAndCheckInTicket);
 // Ticket Retrieval routes
 router.get('/my-tickets', protect, getMyTickets);
 router.get('/:id', protect, getTicketById);
+router.post('/paystack/webhook', paystackWebhook);
 
 export default router;
