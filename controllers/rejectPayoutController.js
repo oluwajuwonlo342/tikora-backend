@@ -1,6 +1,7 @@
 // controllers/rejectPayout.controller.js
 // (You can also paste the function below into your existing payout controller.)
 import Payout from "../models/Payout.js";
+import { sendPayoutRejectedEmail } from "../utils/payoutEmails.js";
 
 // ---------------------------------------------------------------
 // POST /api/payouts/admin/reject/:id   body: { reason }
@@ -35,6 +36,16 @@ export const rejectPayout = async (req, res) => {
     payout.rejectionReason = reason;
     payout.rejectedAt = new Date();
     await payout.save();
+
+    // Load the organizer and event names, then email the organizer the reason
+    await payout.populate([
+      { path: "organizer", select: "name email" },
+      { path: "event", select: "title" },
+    ]);
+
+    sendPayoutRejectedEmail({ payout }).catch((err) =>
+      console.error("Payout rejection email error:", err.message)
+    );
 
     return res.json({
       success: true,
