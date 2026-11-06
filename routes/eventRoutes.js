@@ -10,6 +10,9 @@ import {
   deleteEvent,
   getOrganizerStats,
   addAuthenticator,
+  getEventAttendees,
+  sendBulkEmailToAttendees,
+  
 } from "../controllers/eventController.js";
 
 import protect from "../middleware/authMiddleware.js";
