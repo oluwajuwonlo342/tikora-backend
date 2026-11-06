@@ -957,7 +957,7 @@ export const sendBulkEmailToAttendees = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
-    const tickets = await Ticket.find({ event: id }).populate('user', 'email');
+    const tickets = await Ticket.find({ event: id }).populate('buyer', 'email');
     
     // Extract unique recipient emails
     const emails = [...new Set(
