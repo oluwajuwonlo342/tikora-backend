@@ -95,16 +95,24 @@ export const verifyBankAccount = async (req, res) => {
 // SHARED BALANCE CALCULATION
 //
 // ONE place that works out how much an organizer can still withdraw
-// for an event. The payout form, the Wallet page, the Dashboard and the
-// payout request check all use this, so every screen shows the same number.
+// for an event. The payout form, the Wallet page, the Dashboard, the
+// admin table and the payout request check all use this, so every
+// screen shows the same number.
 //
-//   totalEarned = for each ticket type the organizer created:
-//                 ticket price x number sold, added together
-//                 (the 7% platform fee is charged to buyers on top,
-//                 so it is NOT part of the organizer's earnings)
+//   totalEarned = the price each buyer ACTUALLY PAID for their ticket
+//                 (ticketPrice saved on the ticket when it was bought),
+//                 for every ticket that was not cancelled.
+//                 (The 7% platform fee is charged to buyers on top,
+//                 so it is NOT part of the organizer's earnings.)
 //   paid        = payouts already approved
 //   pending     = payouts requested and waiting for approval
 //   available   = totalEarned - paid - pending
+//
+// Why not "current ticket price x number sold"? Because an organizer can
+// edit a ticket price after some tickets were sold. Using the price saved
+// at purchase means a later price edit can never change what was already
+// earned. The price x sold figure is still returned (tierEstimate) so any
+// difference can be spotted.
 //
 // Rejected payouts are NOT counted, so that money goes back to the organizer.
 //
@@ -115,30 +123,26 @@ const PAID_STATUSES = ['approved'];
 const PENDING_STATUSES = ['pending', 'otp_required'];
 
 export const calculateEventBalance = async (eventId, eventDoc = null) => {
-  const event = eventDoc || (await Event.findById(eventId).select('tickets'));
-  const tiers = Array.isArray(event?.tickets) ? event.tickets : [];
-
-  // Earnings from the organizer's own ticket types: price x sold
-  const byTier = tiers.map((tier) => {
-    const price = Number(tier.price) || 0;
-    const sold = Number(tier.sold) || 0;
-    return { name: tier.name, price, sold, subtotal: price * sold };
-  });
-  const tierTotal = byTier.reduce((sum, t) => sum + t.subtotal, 0);
-  const ticketsSoldByTier = byTier.reduce((sum, t) => sum + t.sold, 0);
-
-  // Cross-check against the individual ticket records (diagnostics only)
+  // What buyers actually paid (price frozen at the time of purchase)
   const allTickets = await Ticket.find({ event: eventId }).select('ticketPrice status');
   const liveTickets = allTickets.filter((t) => t.status !== 'cancelled');
   const cancelledTickets = allTickets.filter((t) => t.status === 'cancelled');
-  const ticketRecordsTotal = liveTickets.reduce(
+
+  const totalEarned = liveTickets.reduce(
     (sum, t) => sum + (Number(t.ticketPrice) || 0),
     0
   );
 
-  // Events without ticket types (very old ones) fall back to the ticket records
-  const usesTicketTypes = byTier.length > 0;
-  const totalEarned = usesTicketTypes ? tierTotal : ticketRecordsTotal;
+  // Cross-check only: current ticket-type price x sold. This MOVES if the
+  // organizer edits a price, so it is never used for the real balance.
+  const event = eventDoc || (await Event.findById(eventId).select('tickets'));
+  const tiers = Array.isArray(event?.tickets) ? event.tickets : [];
+  const byTier = tiers.map((tier) => {
+    const price = Number(tier.price) || 0;
+    const sold = Number(tier.sold) || 0;
+    return { name: tier.name, currentPrice: price, sold, subtotal: price * sold };
+  });
+  const tierEstimate = byTier.reduce((sum, t) => sum + t.subtotal, 0);
 
   const payouts = await Payout.find({
     event: eventId,
@@ -160,15 +164,14 @@ export const calculateEventBalance = async (eventId, eventDoc = null) => {
     paid,
     pending,
     available,
-    ticketCount: usesTicketTypes ? ticketsSoldByTier : liveTickets.length,
-    earnedFrom: usesTicketTypes ? 'ticket types' : 'ticket records',
+    ticketCount: liveTickets.length,
+    // Diagnostics
     byTier,
-    // Diagnostics: if these differ, the ticket records and the ticket-type
-    // sold counts disagree (e.g. a cancelled ticket that was never un-counted)
-    ticketRecordsTotal,
-    differenceFromRecords: usesTicketTypes ? tierTotal - ticketRecordsTotal : 0,
+    tierEstimate,
+    differenceFromTierEstimate: totalEarned - tierEstimate,
     cancelledCount: cancelledTickets.length,
-    cancelledValue: cancelledTickets.reduce((sum, t) => sum + (Number(t.ticketPrice) || 0), 0)
+    cancelledValue: cancelledTickets.reduce((sum, t) => sum + (Number(t.ticketPrice) || 0), 0),
+    unpricedTickets: liveTickets.filter((t) => !(Number(t.ticketPrice) > 0)).length
   };
 };
 
@@ -219,6 +222,29 @@ export const getMyEventBalances = async (req, res) => {
   } catch (error) {
     console.error('Get my balances error:', error);
     return res.status(500).json({ success: false, message: 'Could not load balances.' });
+  }
+};
+
+// ==========================================
+// GET BALANCES FOR EVERY EVENT (Admin Only)
+// GET /api/payouts/admin/event-balances
+// Used by the admin Event Moderation table.
+// ==========================================
+export const getAllEventBalances = async (req, res) => {
+  try {
+    const events = await Event.find().select('_id tickets');
+
+    const balances = {};
+    await Promise.all(
+      events.map(async (event) => {
+        balances[event._id.toString()] = await calculateEventBalance(event._id, event);
+      })
+    );
+
+    return res.status(200).json({ success: true, balances });
+  } catch (error) {
+    console.error('Get all event balances error:', error);
+    return res.status(500).json({ success: false, message: 'Could not load event balances.' });
   }
 };
 
