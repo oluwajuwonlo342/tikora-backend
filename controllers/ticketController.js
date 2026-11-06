@@ -123,7 +123,6 @@ export const initializePurchase = async (req, res) => {
     if (totalAmount === 0) {
       const freeReference = `FREE-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
       
-      // FIX: Handle Guest User for Free Tickets to prevent insertMany crash
       if (!buyerId) {
         let guestUser = await User.findOne({ email: buyerEmail });
         if (!guestUser) {
@@ -157,8 +156,8 @@ export const initializePurchase = async (req, res) => {
           ticketPrice: 0,        
           platformFee: 0,        
           totalAmount: 0,        
-          paymentReference: `${freeReference}-${i}`,
-          status: 'active', // FIX: Explicitly set status to active
+          paymentReference: freeReference, // Storing clean base reference
+          status: 'active',
           attendee: {
             firstName: attendee.firstName || attendees[0].firstName,
             lastName: attendee.lastName || attendees[0].lastName,
@@ -170,16 +169,13 @@ export const initializePurchase = async (req, res) => {
         });
       }
 
-      // FIX: Insert Tickets BEFORE modifying event counts
       const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
       await Ticket.insertMany(dbTickets);
 
-      // Now safe to update event counts
       tier.sold += qty;
       event.eventTicketsSold = (event.eventTicketsSold || 0) + qty;
       await event.save();
 
-      // Emails are sent in parallel over HTTPS (fast). Failures are logged only.
       await sendTicketEmails(ticketsToCreate, event, true);
 
       return res.status(200).json({
@@ -232,30 +228,34 @@ export const verifyPurchase = async (req, res) => {
     const reference = req.body.reference || req.query.reference;
     if (!reference) return res.status(400).json({ success: false, message: "Transaction reference is required." });
 
-    if (reference.startsWith('FREE-')) {
-      const freeTickets = await Ticket.find({ paymentReference: new RegExp(`^${reference}`) });
-      if (freeTickets.length > 0) {
-        return res.status(200).json({ success: true, message: "Free tickets confirmed", tickets: freeTickets });
-      }
-      return res.status(404).json({ success: false, message: "Free tickets not found." });
-    }
-
-    const existingTickets = await Ticket.find({ paymentReference: new RegExp(`^${reference}`) });
+    // 1. Check if tickets with this reference already exist to prevent double-generation
+    const existingTickets = await Ticket.find({ paymentReference: reference });
     if (existingTickets.length > 0) {
       return res.status(200).json({ success: true, message: "Already verified", tickets: existingTickets });
     }
 
+    // 2. Verify transaction with Paystack API
     const paystackVerify = await axios.get(`https://api.paystack.co/transaction/verify/${reference}`, {
       headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` }
     });
 
     const txData = paystackVerify.data.data;
-    if (txData.status !== 'success') return res.status(400).json({ success: false, message: "Payment verification failed." });
+    if (!txData || txData.status !== 'success') {
+      return res.status(400).json({ success: false, message: "Payment verification failed or incomplete." });
+    }
 
-    const { buyerId, eventId, ticketType, quantity, attendees } = txData.metadata;
-    const buyerEmail = txData.customer.email;
+    const metadata = txData.metadata || {};
+    const { buyerId, eventId, ticketType, quantity, attendees } = metadata;
 
-    const reCheckedTickets = await Ticket.find({ paymentReference: new RegExp(`^${reference}`) });
+    if (!eventId || !ticketType || !quantity || !attendees) {
+      console.error("Verification Error: Missing metadata fields from Paystack transaction:", txData);
+      return res.status(400).json({ success: false, message: "Transaction metadata is missing or invalid." });
+    }
+
+    const buyerEmail = txData.customer?.email;
+
+    // Double-check re-entry lock post-Paystack verification
+    const reCheckedTickets = await Ticket.find({ paymentReference: reference });
     if (reCheckedTickets.length > 0) {
       return res.status(200).json({ success: true, message: "Already verified", tickets: reCheckedTickets });
     }
@@ -273,7 +273,7 @@ export const verifyPurchase = async (req, res) => {
     }
 
     let finalBuyerId = buyerId;
-    if (!finalBuyerId) {
+    if (!finalBuyerId && buyerEmail) {
       let guestUser = await User.findOne({ email: buyerEmail });
       if (!guestUser) {
         const randomPassword = crypto.randomBytes(8).toString('hex');
@@ -298,7 +298,7 @@ export const verifyPurchase = async (req, res) => {
       
       const qrCodeDataUrl = await qrcode.toDataURL(uniqueCode);
       const base64Image = qrCodeDataUrl.split(';base64,').pop(); 
-      const recipientEmail = attendee.email || attendees[0].email; 
+      const recipientEmail = attendee.email || buyerEmail; 
 
       ticketsToCreate.push({
         event: eventId,
@@ -311,38 +311,38 @@ export const verifyPurchase = async (req, res) => {
         ticketPrice: ticketPrice,        
         platformFee: platformFee,        
         totalAmount: totalAmount,        
-        paymentReference: `${reference}-${i}`,
-        status: 'active', // FIX: Explicitly set status to active
+        paymentReference: reference, // Clean unified reference for lookup
+        status: 'active',
         attendee: {
-          firstName: attendee.firstName || attendees[0].firstName,
-          lastName: attendee.lastName || attendees[0].lastName,
+          firstName: attendee.firstName || 'Guest',
+          lastName: attendee.lastName || '',
           email: recipientEmail,
-          phone: attendee.phone || attendees[0].phone
+          phone: attendee.phone || ''
         },
         _base64: base64Image,
         _recipientEmail: recipientEmail
       });
     }
 
-    // FIX: Insert Tickets BEFORE modifying event counts
+    // 3. Save tickets into the database FIRST
     const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
     const savedTickets = await Ticket.insertMany(dbTickets);
 
-    // Now safe to update event counts
+    // 4. Update event revenue and ticket counts safely AFTER database write
     tier.sold += Number(quantity);
     event.eventTicketsSold = (event.eventTicketsSold || 0) + Number(quantity);
     event.eventRevenue = (event.eventRevenue || 0) + (txData.amount / 100); 
     await event.save();
 
-    // Emails are sent in parallel over HTTPS (fast). Failures are logged only.
+    // 5. Trigger email delivery (non-blocking failure logging)
     await sendTicketEmails(ticketsToCreate, event, false);
 
     return res.status(200).json({ success: true, message: "Tickets generated successfully", tickets: savedTickets });
 
   } catch (error) {
-    console.error("Verification error:", error);
+    console.error("Verification error details:", error.response?.data || error.message);
     if (!res.headersSent) {
-      return res.status(500).json({ success: false, message: "Server error during payment verification." });
+      return res.status(500).json({ success: false, message: "Server error during payment verification. Please contact support with your payment reference." });
     }
   }
 };
