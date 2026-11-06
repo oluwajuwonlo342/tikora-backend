@@ -3,7 +3,7 @@ import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
 import Payout from "../models/Payout.js";
 import cloudinary from "../config/cloudinary.js";
-import { sendBrevoEmail } from '../utils/bevoMail.js';
+import { sendBrevoEmail } from '../utils/brevoMail.js';
 
 // ==========================================
 // HELPERS
