@@ -6,6 +6,12 @@ import qrcode from 'qrcode';
 import crypto from 'crypto';
 import { sendBrevoEmail, escapeHtml } from '../utils/brevoMail.js';
 
+// Prevents two simultaneous verify calls for the same reference from
+// both creating tickets (e.g. React StrictMode / double redirect).
+// Note: works for a single server instance. For multiple instances,
+// use a DB-level lock instead.
+const verifyInFlight = new Set();
+
 // ==========================================
 // HELPER: SEND TICKET EMAILS (Brevo HTTP API)
 // Groups multiple tickets going to the same email into a single message
@@ -28,7 +34,7 @@ const sendTicketEmails = async (ticketsData, event, isFree) => {
   // 2. Send one email per unique address
   const results = await Promise.allSettled(
     Object.entries(groupedTickets).map(async ([email, tickets]) => {
-      
+
       const primaryAttendee = tickets[0].attendee;
       const primaryName = `${primaryAttendee.firstName || ''} ${primaryAttendee.lastName || ''}`.trim() || undefined;
       const ticketCountText = tickets.length > 1 ? `Here are your ${tickets.length} tickets:` : `Here is your ticket:`;
@@ -58,7 +64,7 @@ const sendTicketEmails = async (ticketsData, event, isFree) => {
             <h2 style="color: #ff5a36;">You're going to ${escapeHtml(event.title)}!</h2>
             <p>Hi <strong>${escapeHtml(primaryAttendee.firstName)}</strong>,</p>
             <p>${intro} ${ticketCountText} The QR codes are attached to this email as images. Please present them at the gate for entry.</p>
-            
+
             <div style="text-align: left; display: inline-block; width: 100%; max-width: 500px; margin-top: 10px;">
               ${ticketDetailsHtml}
             </div>
@@ -105,13 +111,13 @@ export const initializePurchase = async (req, res) => {
 
     const tier = event.tickets.find(t => t.name === ticketType);
     if (!tier) return res.status(400).json({ message: 'Invalid ticket type' });
-    
+
     if (tier.quantity - tier.sold < qty) {
       return res.status(400).json({ message: 'Not enough tickets available in this tier' });
     }
 
     const buyerEmail = req.user ? req.user.email : attendees[0].email;
-    let buyerId = req.user ? req.user._id : null; 
+    let buyerId = req.user ? req.user._id : null;
 
     const subtotal = tier.price * qty;
     const platformFee = subtotal * 0.07;
@@ -122,7 +128,7 @@ export const initializePurchase = async (req, res) => {
     // ===============================================
     if (totalAmount === 0) {
       const freeReference = `FREE-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-      
+
       if (!buyerId) {
         let guestUser = await User.findOne({ email: buyerEmail });
         if (!guestUser) {
@@ -142,8 +148,8 @@ export const initializePurchase = async (req, res) => {
         const attendee = attendees[i];
         const uniqueCode = `${freeReference}-${crypto.randomBytes(3).toString('hex').toUpperCase()}-${i + 1}`;
         const qrCodeDataUrl = await qrcode.toDataURL(uniqueCode);
-        const base64Image = qrCodeDataUrl.split(';base64,').pop(); 
-        const recipientEmail = attendee.email || attendees[0].email; 
+        const base64Image = qrCodeDataUrl.split(';base64,').pop();
+        const recipientEmail = attendee.email || attendees[0].email;
 
         ticketsToCreate.push({
           event: eventId,
@@ -152,17 +158,17 @@ export const initializePurchase = async (req, res) => {
           ticketType,
           ticketCode: uniqueCode,
           qrCode: qrCodeDataUrl,
-          price: 0, 
-          ticketPrice: 0,        
-          platformFee: 0,        
-          totalAmount: 0,        
+          price: 0,
+          ticketPrice: 0,
+          platformFee: 0,
+          totalAmount: 0,
           paymentReference: freeReference,
-          status: 'active',
+          status: 'valid', // FIX: was 'active', which is not in the schema enum
           attendee: {
-            firstName: attendee.firstName || attendees[0].firstName,
-            lastName: attendee.lastName || attendees[0].lastName,
+            firstName: attendee.firstName || attendees[0].firstName || 'Guest',
+            lastName: attendee.lastName || attendees[0].lastName || '',
             email: recipientEmail,
-            phone: attendee.phone || attendees[0].phone
+            phone: attendee.phone || attendees[0].phone || ''
           },
           _base64: base64Image,
           _recipientEmail: recipientEmail
@@ -172,11 +178,22 @@ export const initializePurchase = async (req, res) => {
       const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
       await Ticket.insertMany(dbTickets);
 
-      tier.sold += qty;
-      event.eventTicketsSold = (event.eventTicketsSold || 0) + qty;
-      await event.save();
+      // FIX: atomic counter update (no validation / version-conflict failures)
+      try {
+        await Event.updateOne(
+          { _id: eventId, 'tickets.name': ticketType },
+          { $inc: { 'tickets.$.sold': qty, eventTicketsSold: qty } }
+        );
+      } catch (err) {
+        console.error(`Free counter update failed for ${freeReference}:`, err.message);
+      }
 
-      await sendTicketEmails(ticketsToCreate, event, true);
+      // FIX: emails can never fail the registration
+      try {
+        await sendTicketEmails(ticketsToCreate, event, true);
+      } catch (err) {
+        console.error(`Free email sending failed for ${freeReference}:`, err.message);
+      }
 
       return res.status(200).json({
         authorization_url: `/payment/verify?reference=${freeReference}`,
@@ -190,15 +207,15 @@ export const initializePurchase = async (req, res) => {
     const response = await axios.post(
       'https://api.paystack.co/transaction/initialize',
       {
-        email: buyerEmail, 
-        amount: Math.round(totalAmount * 100), 
+        email: buyerEmail,
+        amount: Math.round(totalAmount * 100),
         callback_url: callback_url || undefined,
         metadata: {
           eventId: eventId.toString(),
           ticketType,
           quantity: qty,
           buyerId: buyerId ? buyerId.toString() : null,
-          attendees 
+          attendees
         }
       },
       {
@@ -224,15 +241,32 @@ export const initializePurchase = async (req, res) => {
 // VERIFY PURCHASE & GENERATE TICKETS
 // ==========================================
 export const verifyPurchase = async (req, res) => {
-  try {
-    const reference = req.body.reference || req.query.reference;
-    if (!reference) return res.status(400).json({ success: false, message: "Transaction reference is required." });
+  const reference = req.body?.reference || req.query?.reference;
 
-    // 1. Check if tickets with this reference already exist
+  try {
+    if (!reference) {
+      return res.status(400).json({ success: false, message: "Transaction reference is required." });
+    }
+
+    // 1. Return existing tickets if this reference was already processed
     const existingTickets = await Ticket.find({ paymentReference: reference });
     if (existingTickets.length > 0) {
       return res.status(200).json({ success: true, message: "Already verified", tickets: existingTickets });
     }
+
+    // Block simultaneous verify calls for the same reference
+    if (verifyInFlight.has(reference)) {
+      // Wait briefly for the first call to finish, then return its tickets
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        const done = await Ticket.find({ paymentReference: reference });
+        if (done.length > 0) {
+          return res.status(200).json({ success: true, message: "Already verified", tickets: done });
+        }
+      }
+      return res.status(409).json({ success: false, message: "Verification is already in progress. Please refresh in a moment." });
+    }
+    verifyInFlight.add(reference);
 
     // 2. Verify transaction with Paystack API
     const paystackVerify = await axios.get(`https://api.paystack.co/transaction/verify/${reference}`, {
@@ -250,11 +284,12 @@ export const verifyPurchase = async (req, res) => {
     const buyerEmail = txData.customer?.email;
     const paidAmount = txData.amount / 100; // Converted from kobo
 
-    // SAFETY FALLBACK: If Paystack stripped metadata, deduce event/tier using amount and customer email
+    // SAFETY FALLBACK: only used if Paystack stripped the metadata.
+    // WARNING: this is a guess based on price. Two events with the same
+    // price could match the wrong one. Prefer fixing why metadata is missing.
     if (!eventId || !ticketType || !quantity) {
       console.warn("⚠️ Paystack metadata missing/stripped. Attempting smart fallback deduction...");
-      
-      // Find events created recently or try to match price
+
       const allEvents = await Event.find({ status: "published" }).sort({ createdAt: -1 }).limit(10);
       let matchedEvent = null;
       let matchedTier = null;
@@ -263,7 +298,6 @@ export const verifyPurchase = async (req, res) => {
       for (const ev of allEvents) {
         for (const tr of ev.tickets || []) {
           const expectedTotal = (tr.price * 1.07); // Price + 7% fee
-          // Check if paid amount matches 1 or multiple tickets
           for (let q = 1; q <= 10; q++) {
             if (Math.abs((expectedTotal * q) - paidAmount) < 5) { // 5 Naira tolerance for rounding
               matchedEvent = ev;
@@ -289,11 +323,20 @@ export const verifyPurchase = async (req, res) => {
         }));
       } else {
         console.error("Critical: Could not map transaction to any event/tier:", txData);
-        return res.status(400).json({ 
-          success: false, 
-          message: "Payment successful, but transaction metadata could not be resolved automatically. Please contact support with reference: " + reference 
+        return res.status(400).json({
+          success: false,
+          message: "Payment successful, but transaction metadata could not be resolved automatically. Please contact support with reference: " + reference
         });
       }
+    }
+
+    // Make sure attendees is always a usable array
+    if (!Array.isArray(attendees)) attendees = [];
+
+    // attendees.length is the source of truth for how many tickets to create
+    const qty = attendees.length > 0 ? attendees.length : Number(quantity);
+    if (!Number.isInteger(qty) || qty < 1) {
+      return res.status(400).json({ success: false, message: "Invalid ticket quantity. Please contact support with reference: " + reference });
     }
 
     // Re-check database entry lock
@@ -304,12 +347,14 @@ export const verifyPurchase = async (req, res) => {
 
     const event = await Event.findById(eventId);
     if (!event) {
-      return res.status(404).json({ success: false, message: "Event not found for this transaction." });
+      console.error(`Verify: payment ${reference} succeeded but event ${eventId} no longer exists.`);
+      return res.status(404).json({ success: false, message: "Event not found for this transaction. Please contact support with reference: " + reference });
     }
 
     const tier = event.tickets.find(t => t.name === ticketType);
     if (!tier) {
-      return res.status(404).json({ success: false, message: "Ticket tier not found for this transaction." });
+      console.error(`Verify: payment ${reference} succeeded but ticket tier "${ticketType}" not found.`);
+      return res.status(404).json({ success: false, message: "Ticket tier not found for this transaction. Please contact support with reference: " + reference });
     }
 
     let finalBuyerId = buyerId;
@@ -326,19 +371,24 @@ export const verifyPurchase = async (req, res) => {
       }
       finalBuyerId = guestUser._id;
     }
-    
+
+    if (!finalBuyerId) {
+      console.error(`Verify: could not determine buyer for ${reference}.`);
+      return res.status(400).json({ success: false, message: "Could not determine the buyer. Please contact support with reference: " + reference });
+    }
+
     const ticketsToCreate = [];
     const ticketPrice = tier.price;
     const platformFee = ticketPrice * 0.07;
     const totalAmount = ticketPrice + platformFee;
 
-    for (let i = 0; i < Number(quantity); i++) {
+    for (let i = 0; i < qty; i++) {
       const attendee = attendees[i] || attendees[0] || {};
       const uniqueCode = `${reference}-${crypto.randomBytes(3).toString('hex').toUpperCase()}-${i + 1}`;
-      
+
       const qrCodeDataUrl = await qrcode.toDataURL(uniqueCode);
-      const base64Image = qrCodeDataUrl.split(';base64,').pop(); 
-      const recipientEmail = attendee.email || buyerEmail; 
+      const base64Image = qrCodeDataUrl.split(';base64,').pop();
+      const recipientEmail = attendee.email || buyerEmail;
 
       ticketsToCreate.push({
         event: eventId,
@@ -347,12 +397,12 @@ export const verifyPurchase = async (req, res) => {
         ticketType,
         ticketCode: uniqueCode,
         qrCode: qrCodeDataUrl,
-        price: ticketPrice, 
-        ticketPrice: ticketPrice,        
-        platformFee: platformFee,        
-        totalAmount: totalAmount,        
+        price: ticketPrice,
+        ticketPrice: ticketPrice,
+        platformFee: platformFee,
+        totalAmount: totalAmount,
         paymentReference: reference,
-        status: 'active',
+        status: 'valid', // FIX: was 'active', which is not in the schema enum
         attendee: {
           firstName: attendee.firstName || 'Guest',
           lastName: attendee.lastName || '',
@@ -368,31 +418,47 @@ export const verifyPurchase = async (req, res) => {
     const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
     const savedTickets = await Ticket.insertMany(dbTickets);
 
-    // 4. Update event revenue and ticket counts safely AFTER database write
-    tier.sold += Number(quantity);
-    event.eventTicketsSold = (event.eventTicketsSold || 0) + Number(quantity);
-    event.eventRevenue = (event.eventRevenue || 0) + paidAmount; 
-    await event.save();
+    // 4. Atomic counter update. A failure here must NOT fail the purchase.
+    try {
+      await Event.updateOne(
+        { _id: eventId, 'tickets.name': ticketType },
+        { $inc: { 'tickets.$.sold': qty, eventTicketsSold: qty, eventRevenue: paidAmount } }
+      );
+    } catch (err) {
+      console.error(`Counter update failed for ${reference}:`, err.message);
+    }
 
-    // 5. Trigger email delivery (non-blocking failure logging)
-    await sendTicketEmails(ticketsToCreate, event, false);
+    // 5. Email delivery. A failure here must NOT fail the purchase.
+    try {
+      await sendTicketEmails(ticketsToCreate, event, false);
+    } catch (err) {
+      console.error(`Email sending failed for ${reference}:`, err.message);
+    }
 
     return res.status(200).json({ success: true, message: "Tickets generated successfully", tickets: savedTickets });
 
   } catch (error) {
     console.error("Verification error details:", error.response?.data || error.message);
     if (!res.headersSent) {
-      return res.status(500).json({ success: false, message: "Server error during payment verification. Please check server logs." });
+      return res.status(500).json({ success: false, message: "Server error during payment verification. Please contact support with your payment reference." });
     }
+  } finally {
+    if (reference) verifyInFlight.delete(reference);
   }
 };
 
 // ==========================================
-// GET MY TICKETS (Buyer)
+// GET MY TICKETS (Buyer or Attendee)
 // ==========================================
 export const getMyTickets = async (req, res) => {
   try {
-    const tickets = await Ticket.find({ buyer: req.user._id })
+    // Includes tickets bought by the user AND tickets issued to their email
+    const tickets = await Ticket.find({
+      $or: [
+        { buyer: req.user._id },
+        { 'attendee.email': req.user.email }
+      ]
+    })
       .populate("event", "title image date endDate venue location category")
       .populate("organizer", "name email avatar")
       .sort({ createdAt: -1 });
@@ -420,8 +486,11 @@ export const getTicketById = async (req, res) => {
 
     const isBuyer = ticket.buyer?._id?.toString() === req.user._id.toString();
     const isOrganizer = ticket.organizer?._id?.toString() === req.user._id.toString();
+    const isAttendee =
+      !!ticket.attendee?.email &&
+      ticket.attendee.email.toLowerCase() === String(req.user.email).toLowerCase();
 
-    if (!isBuyer && !isOrganizer) {
+    if (!isBuyer && !isOrganizer && !isAttendee) {
       return res.status(403).json({ success: false, message: "You are not authorized to view this ticket." });
     }
 
@@ -452,10 +521,10 @@ export const verifyAndCheckInTicket = async (req, res) => {
     }
 
     if (ticket.organizer.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ 
-        success: false, 
-        statusType: "INVALID", 
-        message: "Unauthorized: This ticket belongs to an event organized by someone else." 
+      return res.status(403).json({
+        success: false,
+        statusType: "INVALID",
+        message: "Unauthorized: This ticket belongs to an event organized by someone else."
       });
     }
 
@@ -470,10 +539,10 @@ export const verifyAndCheckInTicket = async (req, res) => {
         timeStyle: 'short'
       });
 
-      return res.status(400).json({ 
-        success: false, 
-        statusType: "ALREADY_USED", 
-        message: `ALREADY USED: This ${ticket.ticketType} ticket was already checked in at ${formattedCheckInTime}` 
+      return res.status(400).json({
+        success: false,
+        statusType: "ALREADY_USED",
+        message: `ALREADY USED: This ${ticket.ticketType} ticket was already checked in at ${formattedCheckInTime}`
       });
     }
 
@@ -481,7 +550,7 @@ export const verifyAndCheckInTicket = async (req, res) => {
     ticket.usedAt = new Date();
     await ticket.save();
 
-    const holderName = ticket.attendee ? `${ticket.attendee.firstName} ${ticket.attendee.lastName}` : ticket.buyer?.name;
+    const holderName = ticket.attendee ? `${ticket.attendee.firstName} ${ticket.attendee.lastName}`.trim() : ticket.buyer?.name;
     const holderEmail = ticket.attendee ? ticket.attendee.email : ticket.buyer?.email;
 
     return res.status(200).json({
