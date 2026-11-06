@@ -6,22 +6,14 @@ import qrcode from 'qrcode';
 import crypto from 'crypto';
 import { sendBrevoEmail, escapeHtml } from '../utils/brevoMail.js';
 
-// Prevents two simultaneous verify calls for the same reference from
-// both creating tickets (e.g. React StrictMode / double redirect).
-// Note: works for a single server instance. For multiple instances,
-// use a DB-level lock instead.
-const verifyInFlight = new Set();
-
 // ==========================================
 // HELPER: SEND TICKET EMAILS (Brevo HTTP API)
-// Groups multiple tickets going to the same email into a single message
 // ==========================================
 const sendTicketEmails = async (ticketsData, event, isFree) => {
   const intro = isFree
     ? 'Your free registration was successful.'
     : 'Your payment was successful.';
 
-  // 1. Group tickets by their destination email
   const groupedTickets = ticketsData.reduce((acc, ticket) => {
     const email = ticket._recipientEmail ? String(ticket._recipientEmail).trim() : null;
     if (email) {
@@ -31,21 +23,17 @@ const sendTicketEmails = async (ticketsData, event, isFree) => {
     return acc;
   }, {});
 
-  // 2. Send one email per unique address
-  const results = await Promise.allSettled(
+  await Promise.allSettled(
     Object.entries(groupedTickets).map(async ([email, tickets]) => {
-
       const primaryAttendee = tickets[0].attendee;
       const primaryName = `${primaryAttendee.firstName || ''} ${primaryAttendee.lastName || ''}`.trim() || undefined;
       const ticketCountText = tickets.length > 1 ? `Here are your ${tickets.length} tickets:` : `Here is your ticket:`;
 
-      // Build all attachments for this specific email
       const attachments = tickets.map(ticket => ({
         name: `Ticket-${ticket.ticketCode}.png`,
         content: ticket._base64,
       }));
 
-      // Build the HTML breakdown for all tickets in this email
       const ticketDetailsHtml = tickets.map(ticket => `
         <div style="background: white; padding: 15px; border-radius: 10px; border: 1px solid #eee; margin-top: 10px;">
           <p style="margin: 5px 0;"><strong>Attendee:</strong> ${escapeHtml(ticket.attendee.firstName)} ${escapeHtml(ticket.attendee.lastName)}</p>
@@ -63,8 +51,7 @@ const sendTicketEmails = async (ticketsData, event, isFree) => {
           <div style="font-family: sans-serif; padding: 20px; text-align: center; background: #f9f9f9;">
             <h2 style="color: #ff5a36;">You're going to ${escapeHtml(event.title)}!</h2>
             <p>Hi <strong>${escapeHtml(primaryAttendee.firstName)}</strong>,</p>
-            <p>${intro} ${ticketCountText} The QR codes are attached to this email as images. Please present them at the gate for entry.</p>
-
+            <p>${intro} ${ticketCountText} The QR codes are attached to this email as images.</p>
             <div style="text-align: left; display: inline-block; width: 100%; max-width: 500px; margin-top: 10px;">
               ${ticketDetailsHtml}
             </div>
@@ -72,22 +59,8 @@ const sendTicketEmails = async (ticketsData, event, isFree) => {
         `,
         attachments: attachments,
       });
-
-      return { email, count: tickets.length, skipped: false };
     })
   );
-
-  // 3. Log results
-  results.forEach((result) => {
-    const label = isFree ? 'Free' : 'Paid';
-    if (result.status === 'fulfilled') {
-      if (!result.value.skipped) {
-        console.log(`✅ ${label} email sent to ${result.value.email} with ${result.value.count} ticket(s).`);
-      }
-    } else {
-      console.error(`❌ ${label} ticket email failed: ${result.reason?.message}`);
-    }
-  });
 };
 
 // ==========================================
@@ -109,10 +82,11 @@ export const initializePurchase = async (req, res) => {
     const event = await Event.findById(eventId);
     if (!event) return res.status(404).json({ message: 'Event not found' });
 
-    const tier = event.tickets.find(t => t.name === ticketType);
+    // Flexible tier matching (checks name or title)
+    const tier = event.tickets.find(t => t.name === ticketType || t.title === ticketType);
     if (!tier) return res.status(400).json({ message: 'Invalid ticket type' });
 
-    if (tier.quantity - tier.sold < qty) {
+    if ((tier.quantity - (tier.sold || 0)) < qty) {
       return res.status(400).json({ message: 'Not enough tickets available in this tier' });
     }
 
@@ -155,7 +129,7 @@ export const initializePurchase = async (req, res) => {
           event: eventId,
           buyer: buyerId,
           organizer: event.organizer,
-          ticketType,
+          ticketType: tier.name || tier.title,
           ticketCode: uniqueCode,
           qrCode: qrCodeDataUrl,
           price: 0,
@@ -163,12 +137,12 @@ export const initializePurchase = async (req, res) => {
           platformFee: 0,
           totalAmount: 0,
           paymentReference: freeReference,
-          status: 'valid', // FIX: was 'active', which is not in the schema enum
+          status: 'valid',
           attendee: {
-            firstName: attendee.firstName || attendees[0].firstName || 'Guest',
-            lastName: attendee.lastName || attendees[0].lastName || '',
+            firstName: attendee.firstName || 'Guest',
+            lastName: attendee.lastName || '',
             email: recipientEmail,
-            phone: attendee.phone || attendees[0].phone || ''
+            phone: attendee.phone || ''
           },
           _base64: base64Image,
           _recipientEmail: recipientEmail
@@ -178,21 +152,16 @@ export const initializePurchase = async (req, res) => {
       const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
       await Ticket.insertMany(dbTickets);
 
-      // FIX: atomic counter update (no validation / version-conflict failures)
-      try {
-        await Event.updateOne(
-          { _id: eventId, 'tickets.name': ticketType },
-          { $inc: { 'tickets.$.sold': qty, eventTicketsSold: qty } }
-        );
-      } catch (err) {
-        console.error(`Free counter update failed for ${freeReference}:`, err.message);
-      }
+      // Safe update matching either name or title
+      await Event.updateOne(
+        { _id: eventId, $or: [{ 'tickets.name': ticketType }, { 'tickets.title': ticketType }] },
+        { $inc: { 'tickets.$.sold': qty, eventTicketsSold: qty } }
+      );
 
-      // FIX: emails can never fail the registration
       try {
         await sendTicketEmails(ticketsToCreate, event, true);
       } catch (err) {
-        console.error(`Free email sending failed for ${freeReference}:`, err.message);
+        console.error("Free email failed:", err.message);
       }
 
       return res.status(200).json({
@@ -202,7 +171,7 @@ export const initializePurchase = async (req, res) => {
     }
 
     // ===============================================
-    // CONTINUE TO PAYSTACK INITIALIZE FOR PAID TICKETS
+    // PAID TICKETS (PAYSTACK INITIALIZE)
     // ===============================================
     const response = await axios.post(
       'https://api.paystack.co/transaction/initialize',
@@ -212,7 +181,7 @@ export const initializePurchase = async (req, res) => {
         callback_url: callback_url || undefined,
         metadata: {
           eventId: eventId.toString(),
-          ticketType,
+          ticketType: tier.name || tier.title,
           quantity: qty,
           buyerId: buyerId ? buyerId.toString() : null,
           attendees
@@ -248,27 +217,13 @@ export const verifyPurchase = async (req, res) => {
       return res.status(400).json({ success: false, message: "Transaction reference is required." });
     }
 
-    // 1. Return existing tickets if this reference was already processed
+    // 1. Idempotency check: If tickets already exist for this reference, return them immediately
     const existingTickets = await Ticket.find({ paymentReference: reference });
     if (existingTickets.length > 0) {
       return res.status(200).json({ success: true, message: "Already verified", tickets: existingTickets });
     }
 
-    // Block simultaneous verify calls for the same reference
-    if (verifyInFlight.has(reference)) {
-      // Wait briefly for the first call to finish, then return its tickets
-      for (let i = 0; i < 10; i++) {
-        await new Promise(r => setTimeout(r, 500));
-        const done = await Ticket.find({ paymentReference: reference });
-        if (done.length > 0) {
-          return res.status(200).json({ success: true, message: "Already verified", tickets: done });
-        }
-      }
-      return res.status(409).json({ success: false, message: "Verification is already in progress. Please refresh in a moment." });
-    }
-    verifyInFlight.add(reference);
-
-    // 2. Verify transaction with Paystack API
+    // 2. Verify with Paystack API
     const paystackVerify = await axios.get(`https://api.paystack.co/transaction/verify/${reference}`, {
       headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` }
     });
@@ -282,14 +237,10 @@ export const verifyPurchase = async (req, res) => {
     let { buyerId, eventId, ticketType, quantity, attendees } = metadata;
 
     const buyerEmail = txData.customer?.email;
-    const paidAmount = txData.amount / 100; // Converted from kobo
+    const paidAmount = txData.amount / 100;
 
-    // SAFETY FALLBACK: only used if Paystack stripped the metadata.
-    // WARNING: this is a guess based on price. Two events with the same
-    // price could match the wrong one. Prefer fixing why metadata is missing.
+    // Fallback if metadata was stripped by Paystack
     if (!eventId || !ticketType || !quantity) {
-      console.warn("⚠️ Paystack metadata missing/stripped. Attempting smart fallback deduction...");
-
       const allEvents = await Event.find({ status: "published" }).sort({ createdAt: -1 }).limit(10);
       let matchedEvent = null;
       let matchedTier = null;
@@ -297,9 +248,9 @@ export const verifyPurchase = async (req, res) => {
 
       for (const ev of allEvents) {
         for (const tr of ev.tickets || []) {
-          const expectedTotal = (tr.price * 1.07); // Price + 7% fee
+          const expectedTotal = (tr.price * 1.07);
           for (let q = 1; q <= 10; q++) {
-            if (Math.abs((expectedTotal * q) - paidAmount) < 5) { // 5 Naira tolerance for rounding
+            if (Math.abs((expectedTotal * q) - paidAmount) < 5) {
               matchedEvent = ev;
               matchedTier = tr;
               matchedQty = q;
@@ -313,7 +264,7 @@ export const verifyPurchase = async (req, res) => {
 
       if (matchedEvent && matchedTier) {
         eventId = matchedEvent._id.toString();
-        ticketType = matchedTier.name;
+        ticketType = matchedTier.name || matchedTier.title;
         quantity = matchedQty;
         attendees = Array.from({ length: quantity }, () => ({
           firstName: txData.customer?.first_name || 'Guest',
@@ -322,24 +273,17 @@ export const verifyPurchase = async (req, res) => {
           phone: txData.customer?.phone || ''
         }));
       } else {
-        console.error("Critical: Could not map transaction to any event/tier:", txData);
         return res.status(400).json({
           success: false,
-          message: "Payment successful, but transaction metadata could not be resolved automatically. Please contact support with reference: " + reference
+          message: "Payment successful, but transaction metadata could not be resolved automatically. Reference: " + reference
         });
       }
     }
 
-    // Make sure attendees is always a usable array
     if (!Array.isArray(attendees)) attendees = [];
-
-    // attendees.length is the source of truth for how many tickets to create
     const qty = attendees.length > 0 ? attendees.length : Number(quantity);
-    if (!Number.isInteger(qty) || qty < 1) {
-      return res.status(400).json({ success: false, message: "Invalid ticket quantity. Please contact support with reference: " + reference });
-    }
 
-    // Re-check database entry lock
+    // Double check DB entry lock post-Paystack API call
     const reCheckedTickets = await Ticket.find({ paymentReference: reference });
     if (reCheckedTickets.length > 0) {
       return res.status(200).json({ success: true, message: "Already verified", tickets: reCheckedTickets });
@@ -347,14 +291,12 @@ export const verifyPurchase = async (req, res) => {
 
     const event = await Event.findById(eventId);
     if (!event) {
-      console.error(`Verify: payment ${reference} succeeded but event ${eventId} no longer exists.`);
-      return res.status(404).json({ success: false, message: "Event not found for this transaction. Please contact support with reference: " + reference });
+      return res.status(404).json({ success: false, message: "Event not found for this transaction." });
     }
 
-    const tier = event.tickets.find(t => t.name === ticketType);
+    const tier = event.tickets.find(t => t.name === ticketType || t.title === ticketType);
     if (!tier) {
-      console.error(`Verify: payment ${reference} succeeded but ticket tier "${ticketType}" not found.`);
-      return res.status(404).json({ success: false, message: "Ticket tier not found for this transaction. Please contact support with reference: " + reference });
+      return res.status(404).json({ success: false, message: "Ticket tier not found for this transaction." });
     }
 
     let finalBuyerId = buyerId;
@@ -372,11 +314,6 @@ export const verifyPurchase = async (req, res) => {
       finalBuyerId = guestUser._id;
     }
 
-    if (!finalBuyerId) {
-      console.error(`Verify: could not determine buyer for ${reference}.`);
-      return res.status(400).json({ success: false, message: "Could not determine the buyer. Please contact support with reference: " + reference });
-    }
-
     const ticketsToCreate = [];
     const ticketPrice = tier.price;
     const platformFee = ticketPrice * 0.07;
@@ -385,7 +322,6 @@ export const verifyPurchase = async (req, res) => {
     for (let i = 0; i < qty; i++) {
       const attendee = attendees[i] || attendees[0] || {};
       const uniqueCode = `${reference}-${crypto.randomBytes(3).toString('hex').toUpperCase()}-${i + 1}`;
-
       const qrCodeDataUrl = await qrcode.toDataURL(uniqueCode);
       const base64Image = qrCodeDataUrl.split(';base64,').pop();
       const recipientEmail = attendee.email || buyerEmail;
@@ -394,7 +330,7 @@ export const verifyPurchase = async (req, res) => {
         event: eventId,
         buyer: finalBuyerId,
         organizer: event.organizer,
-        ticketType,
+        ticketType: tier.name || tier.title,
         ticketCode: uniqueCode,
         qrCode: qrCodeDataUrl,
         price: ticketPrice,
@@ -402,7 +338,7 @@ export const verifyPurchase = async (req, res) => {
         platformFee: platformFee,
         totalAmount: totalAmount,
         paymentReference: reference,
-        status: 'valid', // FIX: was 'active', which is not in the schema enum
+        status: 'valid',
         attendee: {
           firstName: attendee.firstName || 'Guest',
           lastName: attendee.lastName || '',
@@ -414,25 +350,27 @@ export const verifyPurchase = async (req, res) => {
       });
     }
 
-    // 3. Save tickets into the database FIRST
+    // 3. Save tickets to database
     const dbTickets = ticketsToCreate.map(({ _base64, _recipientEmail, ...rest }) => rest);
     const savedTickets = await Ticket.insertMany(dbTickets);
 
-    // 4. Atomic counter update. A failure here must NOT fail the purchase.
-    try {
-      await Event.updateOne(
-        { _id: eventId, 'tickets.name': ticketType },
-        { $inc: { 'tickets.$.sold': qty, eventTicketsSold: qty, eventRevenue: paidAmount } }
-      );
-    } catch (err) {
-      console.error(`Counter update failed for ${reference}:`, err.message);
-    }
+    // 4. Update Event Sold Count & Revenue securely using $or condition for field name variants
+    await Event.updateOne(
+      { _id: eventId, $or: [{ 'tickets.name': ticketType }, { 'tickets.title': ticketType }] },
+      { 
+        $inc: { 
+          'tickets.$.sold': qty, 
+          eventTicketsSold: qty, 
+          eventRevenue: paidAmount 
+        } 
+      }
+    );
 
-    // 5. Email delivery. A failure here must NOT fail the purchase.
+    // 5. Send confirmation emails asynchronously
     try {
       await sendTicketEmails(ticketsToCreate, event, false);
     } catch (err) {
-      console.error(`Email sending failed for ${reference}:`, err.message);
+      console.error("Email sending failed:", err.message);
     }
 
     return res.status(200).json({ success: true, message: "Tickets generated successfully", tickets: savedTickets });
@@ -440,19 +378,16 @@ export const verifyPurchase = async (req, res) => {
   } catch (error) {
     console.error("Verification error details:", error.response?.data || error.message);
     if (!res.headersSent) {
-      return res.status(500).json({ success: false, message: "Server error during payment verification. Please contact support with your payment reference." });
+      return res.status(500).json({ success: false, message: "Server error during payment verification." });
     }
-  } finally {
-    if (reference) verifyInFlight.delete(reference);
   }
 };
 
 // ==========================================
-// GET MY TICKETS (Buyer or Attendee)
+// GET MY TICKETS
 // ==========================================
 export const getMyTickets = async (req, res) => {
   try {
-    // Includes tickets bought by the user AND tickets issued to their email
     const tickets = await Ticket.find({
       $or: [
         { buyer: req.user._id },
