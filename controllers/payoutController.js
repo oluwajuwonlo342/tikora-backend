@@ -103,22 +103,27 @@ export const verifyBankAccount = async (req, res) => {
 // admin table and the payout request check all use this, so every
 // screen shows the same number.
 //
-//   totalEarned = the price each buyer ACTUALLY PAID for their ticket
-//                 (ticketPrice saved on the ticket when it was bought),
-//                 for every ticket that was not cancelled.
-//                 (The 7% platform fee is charged to buyers on top,
-//                 so it is NOT part of the organizer's earnings.)
-//   paid        = payouts already approved
-//   pending     = payouts requested and waiting for approval
-//   available   = totalEarned - paid - pending
+//   grossRevenue    = for each ticket type: price x number sold, added up.
+//                     This follows the tickets that were actually counted as
+//                     sold. (The 7% platform fee is paid by buyers on top, so
+//                     it is NOT part of the organizer's revenue.)
+//   amountCollected = the total of every ticket record that was saved and
+//                     not cancelled, i.e. the money actually collected.
+//                     It can be MORE than grossRevenue if a payment went
+//                     through but the ticket was never counted as sold.
+//   withdrawable    = the LOWER of grossRevenue and amountCollected.
+//                     Whichever figure is wrong, the organizer is never paid
+//                     more than the evidence supports.
+//   paid            = payouts already approved
+//   pending         = payouts requested and waiting for approval
+//   available       = withdrawable - paid - pending
 //
-// Why not "current ticket price x number sold"? Because an organizer can
-// edit a ticket price after some tickets were sold. Using the price saved
-// at purchase means a later price edit can never change what was already
-// earned. The price x sold figure is still returned (tierEstimate) so any
-// difference can be spotted.
+// Organizers can withdraw at any time (no waiting until after the event).
 //
 // Rejected payouts are NOT counted, so that money goes back to the organizer.
+//
+// totalEarned is kept as another name for grossRevenue, so the Wallet page,
+// Dashboard and payout form pick up the same figure.
 //
 // Pass the event document as the second argument if you already loaded it
 // (it needs the `tickets` field) to save a database query.
@@ -127,26 +132,29 @@ const PAID_STATUSES = ['approved'];
 const PENDING_STATUSES = ['pending', 'otp_required'];
 
 export const calculateEventBalance = async (eventId, eventDoc = null) => {
-  // What buyers actually paid (price frozen at the time of purchase)
+  // Money actually collected: every saved, non-cancelled ticket record
   const allTickets = await Ticket.find({ event: eventId }).select('ticketPrice status');
   const liveTickets = allTickets.filter((t) => t.status !== 'cancelled');
   const cancelledTickets = allTickets.filter((t) => t.status === 'cancelled');
 
-  const totalEarned = liveTickets.reduce(
+  const amountCollected = liveTickets.reduce(
     (sum, t) => sum + (Number(t.ticketPrice) || 0),
     0
   );
 
-  // Cross-check only: current ticket-type price x sold. This MOVES if the
-  // organizer edits a price, so it is never used for the real balance.
+  // Gross revenue: ticket type price x number sold
   const event = eventDoc || (await Event.findById(eventId).select('tickets'));
   const tiers = Array.isArray(event?.tickets) ? event.tickets : [];
   const byTier = tiers.map((tier) => {
     const price = Number(tier.price) || 0;
     const sold = Number(tier.sold) || 0;
-    return { name: tier.name, currentPrice: price, sold, subtotal: price * sold };
+    return { name: tier.name, price, sold, subtotal: price * sold };
   });
-  const tierEstimate = byTier.reduce((sum, t) => sum + t.subtotal, 0);
+  const tierTotal = byTier.reduce((sum, t) => sum + t.subtotal, 0);
+  const ticketsCounted = byTier.reduce((sum, t) => sum + t.sold, 0);
+
+  // Events without ticket types (very old ones) fall back to the ticket records
+  const grossRevenue = tiers.length > 0 ? tierTotal : amountCollected;
 
   const payouts = await Payout.find({
     event: eventId,
@@ -161,21 +169,29 @@ export const calculateEventBalance = async (eventId, eventDoc = null) => {
     .filter((p) => PENDING_STATUSES.includes(p.status))
     .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
 
-  const available = Math.max(totalEarned - paid - pending, 0);
+  // Withdraw against the lower of the two figures
+  const withdrawable = Math.min(grossRevenue, amountCollected);
+  const available = Math.max(withdrawable - paid - pending, 0);
 
   return {
-    totalEarned,
+    grossRevenue,
+    totalEarned: grossRevenue,
+    amountCollected,
+    // Money collected that is not matched to a counted ticket (e.g. a payment
+    // whose ticket was never added to the sold count). Worth checking by hand.
+    collectedNotCounted: Math.max(amountCollected - grossRevenue, 0),
+    // The opposite case: counted as sold, but no matching ticket payment record.
+    // This part is held back from withdrawals until it is checked.
+    countedNotCollected: Math.max(grossRevenue - amountCollected, 0),
+    withdrawable,
     paid,
     pending,
     available,
-    ticketCount: liveTickets.length,
-    // Diagnostics
+    ticketCount: tiers.length > 0 ? ticketsCounted : liveTickets.length,
+    ticketRecordCount: liveTickets.length,
     byTier,
-    tierEstimate,
-    differenceFromTierEstimate: totalEarned - tierEstimate,
     cancelledCount: cancelledTickets.length,
-    cancelledValue: cancelledTickets.reduce((sum, t) => sum + (Number(t.ticketPrice) || 0), 0),
-    unpricedTickets: liveTickets.filter((t) => !(Number(t.ticketPrice) > 0)).length
+    cancelledValue: cancelledTickets.reduce((sum, t) => sum + (Number(t.ticketPrice) || 0), 0)
   };
 };
 
