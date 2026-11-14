@@ -27,6 +27,9 @@ const isValidObjectId = (id) =>
 const escapeRegex = (value = "") =>
   String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// Uploads the event image to Cloudinary.
+// - timeout: gives a slow connection up to 2 minutes instead of failing early
+// - transformation: Cloudinary shrinks very large photos (max 1600px) before storing them
 const uploadEventImage = (file) =>
   new Promise((resolve, reject) => {
     if (!file?.buffer) {
@@ -38,6 +41,10 @@ const uploadEventImage = (file) =>
       {
         folder: "event-ticketing/events",
         resource_type: "image",
+        timeout: 120000,
+        transformation: [
+          { width: 1600, height: 1600, crop: "limit", quality: "auto" },
+        ],
       },
       (error, result) => {
         if (error) return reject(error);
@@ -53,7 +60,22 @@ const uploadEventImage = (file) =>
     stream.end(file.buffer);
   });
 
-const parseTickets = (tickets) => {
+// ==========================================
+// TICKET TYPES
+//
+// Gross revenue is price x number sold, so these fields must be trustworthy:
+//   - "sold" is NEVER taken from the browser. It only comes from the saved event
+//     (a new ticket type always starts at 0).
+//   - Once a ticket type has sales, its price is locked.
+//   - Quantity can never go below the number already sold
+//     (set quantity equal to sold to end sales of a type early).
+//   - A ticket type that already has sales can't be removed or lost in an edit.
+//
+// existingTickets = the tickets already saved on the event (empty when creating).
+// If your ticket types have other fields (for example a description), add them
+// to the object returned at the end of the map below.
+// ==========================================
+const parseTickets = (tickets, existingTickets = []) => {
   let parsed = tickets;
 
   if (typeof tickets === "string") {
@@ -68,7 +90,7 @@ const parseTickets = (tickets) => {
     throw new Error("At least one ticket type is required.");
   }
 
-  return parsed.map((ticket) => {
+  const result = parsed.map((ticket) => {
     const name = String(ticket?.name || "").trim();
     const price = Number(ticket?.price);
     const quantity = Number(ticket?.quantity);
@@ -81,15 +103,49 @@ const parseTickets = (tickets) => {
       throw new Error(`Invalid ticket price for "${name}".`);
     }
 
-    if (
-      !Number.isInteger(quantity) ||
-      quantity < 1
-    ) {
+    if (!Number.isInteger(quantity) || quantity < 1) {
       throw new Error(`Ticket quantity for "${name}" must be a positive whole number.`);
     }
 
-    return { ...ticket, name, price, quantity };
+    // Find the same ticket type already saved on the event (by id, otherwise by name)
+    const existing = existingTickets.find(
+      (t) =>
+        (ticket?._id && t._id?.toString() === String(ticket._id)) || t.name === name
+    );
+    const sold = Number(existing?.sold) || 0;
+
+    // Once a ticket type has sales, its price is locked
+    if (existing && sold > 0 && price !== Number(existing.price)) {
+      throw new Error(`"${name}" already has sales, so its price can no longer be changed.`);
+    }
+
+    // Quantity can't drop below what has already been sold
+    if (quantity < sold) {
+      throw new Error(`"${name}" has ${sold} tickets sold, so the quantity can't be lower than that.`);
+    }
+
+    // "sold" is never taken from the browser. It only comes from the saved event.
+    return { ...(existing?._id ? { _id: existing._id } : {}), name, price, quantity, sold };
   });
+
+  // A ticket type that already has sales can't be removed or lost in an edit
+  const keptIds = new Set(result.filter((t) => t._id).map((t) => String(t._id)));
+  const keptNames = new Set(result.map((t) => t.name));
+
+  const lost = existingTickets.filter(
+    (t) =>
+      (Number(t.sold) || 0) > 0 &&
+      !keptIds.has(String(t._id)) &&
+      !keptNames.has(t.name)
+  );
+
+  if (lost.length > 0) {
+    throw new Error(
+      `These ticket types already have sales and can't be removed: ${lost.map((t) => t.name).join(", ")}.`
+    );
+  }
+
+  return result;
 };
 
 // ==========================================
@@ -177,6 +233,7 @@ export const createEvent = async (req, res) => {
     let cleanedTickets;
 
     try {
+      // New event: every ticket type starts with sold = 0
       cleanedTickets = parseTickets(tickets);
     } catch (error) {
       return res.status(400).json({
@@ -483,7 +540,9 @@ export const updateEvent = async (req, res) => {
 
     if (tickets !== undefined) {
       try {
-        event.tickets = parseTickets(tickets);
+        // Pass the saved tickets so "sold" is kept, prices with sales stay locked,
+        // and ticket types with sales can't disappear.
+        event.tickets = parseTickets(tickets, event.tickets);
       } catch (error) {
         return res.status(400).json({
           success: false,
@@ -890,6 +949,7 @@ export const addAuthenticator = async (req, res) => {
     });
   }
 };
+
 // ==========================================
 // GET EVENT ATTENDEES (ORGANIZER/ADMIN)
 // ==========================================
@@ -898,7 +958,7 @@ export const getEventAttendees = async (req, res) => {
   try {
     const { id } = req.params;
     const event = await Event.findById(id);
-    
+
     if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
 
     // Verify requesting user is the organizer or admin
@@ -906,7 +966,7 @@ export const getEventAttendees = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
-    // FIX: Only populate 'buyer', because 'user' does not exist in the Ticket schema
+    // Only populate 'buyer', because 'user' does not exist in the Ticket schema
     const tickets = await Ticket.find({ event: id })
       .populate('buyer', 'name email')
       .lean();
@@ -916,17 +976,17 @@ export const getEventAttendees = async (req, res) => {
       attendees: tickets.map(t => ({
         ticketId: t._id,
         ticketCode: t.ticketCode || t._id,
-        
+
         // Safely extract the attendee name or fallback to the buyer's name
-        userName: t.attendee?.firstName 
-          ? `${t.attendee.firstName} ${t.attendee.lastName || ''}`.trim() 
+        userName: t.attendee?.firstName
+          ? `${t.attendee.firstName} ${t.attendee.lastName || ''}`.trim()
           : (t.buyer?.name || 'Guest User'),
-          
+
         userEmail: t.attendee?.email || t.buyer?.email || 'N/A',
-        
+
         ticketTier: t.ticketType || 'Standard',
         price: t.ticketPrice || t.price || 0,
-        
+
         isScanned: t.status === 'used' || false,
         scannedAt: t.usedAt || null,
         purchasedAt: t.createdAt
@@ -937,6 +997,7 @@ export const getEventAttendees = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error fetching attendees' });
   }
 };
+
 // ==========================================
 // SEND BULK EMAIL TO ATTENDEES
 // ==========================================
@@ -944,10 +1005,18 @@ export const getEventAttendees = async (req, res) => {
 export const sendBulkEmailToAttendees = async (req, res) => {
   try {
     const { id } = req.params;
-    const { subject, message } = req.body;
+    const subject = req.body.subject?.trim();
+    const message = req.body.message?.trim();
 
     if (!subject || !message) {
       return res.status(400).json({ success: false, message: 'Subject and message are required' });
+    }
+
+    if (subject.length > 150 || message.length > 5000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Subject must be under 150 characters and message under 5000.'
+      });
     }
 
     const event = await Event.findById(id);
@@ -957,41 +1026,58 @@ export const sendBulkEmailToAttendees = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
-    // Populate buyer just in case attendee email is missing
-    const tickets = await Ticket.find({ event: id }).populate('buyer', 'email');
-    
-    // FIX: Map using the correct updated schema fields (attendee and buyer)
+    // Cancelled tickets should not receive event updates.
+    // Buyer is populated in case the attendee email is missing.
+    const tickets = await Ticket.find({ event: id, status: { $ne: 'cancelled' } })
+      .populate('buyer', 'email');
+
     const emails = [...new Set(
-      tickets.map(t => t.attendee?.email || t.buyer?.email).filter(Boolean)
+      tickets
+        .map(t => (t.attendee?.email || t.buyer?.email || '').trim().toLowerCase())
+        .filter(Boolean)
     )];
 
     if (emails.length === 0) {
       return res.status(400).json({ success: false, message: 'No attendee emails found for this event.' });
     }
 
-    // Send broadcast email to all attendees using Brevo API
-    // Using Promise.allSettled makes it faster and prevents one bad email from crashing the rest
-    const emailPromises = emails.map(email => 
-      sendBrevoEmail({
-        to: email,
-        subject: `[${event.title}] ${subject}`,
-        html: `
-          <div style="font-family: sans-serif; padding: 20px; line-height: 1.6;">
-            <h2>Update from ${event.title} Organizer</h2>
-            <p>${message.replace(/\n/g, '<br>')}</p>
-            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-            <small style="color: #888;">You received this email because you hold a ticket for ${event.title}.</small>
-          </div>
-        `,
-        senderName: "Tickora"
-      })
+    // The organizer's text is escaped, so it can't inject HTML or scripts into the email
+    const safeTitle = escapeHtml(event.title);
+    const safeMessage = escapeHtml(message).replace(/\n/g, '<br>');
+    const cleanSubject = `[${event.title}] ${subject}`.replace(/[\r\n]+/g, ' ');
+
+    const html = `
+      <div style="font-family: sans-serif; padding: 20px; line-height: 1.6;">
+        <h2>Update from ${safeTitle} Organizer</h2>
+        <p>${safeMessage}</p>
+        <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+        <small style="color: #888;">You received this email because you hold a ticket for ${safeTitle}.</small>
+      </div>
+    `;
+
+    // Promise.allSettled stops one bad email from crashing the rest
+    const results = await Promise.allSettled(
+      emails.map(email =>
+        sendBrevoEmail({
+          to: email,
+          subject: cleanSubject,
+          html,
+          senderName: "Tickora"
+        })
+      )
     );
 
-    await Promise.allSettled(emailPromises);
+    const sent = results.filter(r => r.status === 'fulfilled').length;
+    const failed = results.length - sent;
 
     res.status(200).json({
       success: true,
-      message: `Broadcast email sent successfully to ${emails.length} attendee(s).`
+      message:
+        failed === 0
+          ? `Broadcast email sent successfully to ${sent} attendee(s).`
+          : `Sent to ${sent} attendee(s). ${failed} failed.`,
+      sent,
+      failed
     });
   } catch (error) {
     console.error('Error sending bulk email:', error);
