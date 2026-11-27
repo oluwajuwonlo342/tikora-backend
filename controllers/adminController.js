@@ -1,18 +1,21 @@
+import mongoose from 'mongoose';
 import User from '../models/User.js';
 import Event from '../models/Event.js';
 
 export const getDashboardStats = async (req, res) => {
   try {
     const totalUsers = await User.countDocuments();
-    const activeEvents = await Event.countDocuments();
-    
+
+    // Only published events are "active" (cancelled and draft events are hidden from the public)
+    const activeEvents = await Event.countDocuments({ status: 'published' });
+
     // Dynamically calculate platform revenue (7% fee) from all ticket sales
     const events = await Event.find();
     let platformRevenue = 0;
 
     events.forEach(evt => {
       let eventGross = 0;
-      
+
       // Calculate from ticket tiers
       if (evt.tickets && evt.tickets.length > 0) {
         evt.tickets.forEach(tier => {
@@ -22,7 +25,7 @@ export const getDashboardStats = async (req, res) => {
         // Fallback for any legacy data
         eventGross = evt.eventRevenue;
       }
-      
+
       // Add 7% of this event's gross to the platform total
       platformRevenue += (eventGross * 0.07);
     });
@@ -56,7 +59,7 @@ export const getAllEvents = async (req, res) => {
       .populate('organizer', 'name email')
       .sort({ createdAt: -1 });
 
-    // ✅ Attach calculated financial metrics and total tickets sold to each event for the admin view
+    // Attach calculated financial metrics and total tickets sold to each event for the admin view
     const eventsWithFinancials = events.map(event => {
       let grossEarned = 0;
       let ticketsSoldCount = 0;
@@ -84,5 +87,55 @@ export const getAllEvents = async (req, res) => {
   } catch (error) {
     console.error("Get all events error:", error);
     res.status(500).json({ success: false, message: 'Failed to fetch events' });
+  }
+};
+
+// ==========================================
+// SUSPEND / RESTORE A USER (powers the "Ban User" button)
+// PATCH /api/admin/users/:id/status   body: { isActive: true | false }
+//
+// A suspended user is refused at login ("Your account has been suspended").
+// Admin accounts can't be suspended here, and you can't suspend yourself.
+// ==========================================
+export const setUserStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isActive } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid user ID.' });
+    }
+
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'isActive must be true or false.' });
+    }
+
+    if (id === String(req.user?._id)) {
+      return res.status(400).json({ success: false, message: "You can't suspend your own account." });
+    }
+
+    const user = await User.findById(id);
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    if (user.role === 'admin') {
+      return res.status(403).json({ success: false, message: "Admin accounts can't be suspended here." });
+    }
+
+    user.isActive = isActive;
+    await user.save({ validateBeforeSave: false });
+
+    console.log(`Admin ${req.user?._id} ${isActive ? 'restored' : 'suspended'} user ${id}`);
+
+    res.status(200).json({
+      success: true,
+      message: isActive ? 'User restored.' : 'User suspended.',
+      user: { _id: user._id, isActive: user.isActive }
+    });
+  } catch (error) {
+    console.error('Set user status error:', error);
+    res.status(500).json({ success: false, message: 'Failed to update the user.' });
   }
 };
